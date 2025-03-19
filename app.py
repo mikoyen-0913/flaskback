@@ -11,7 +11,7 @@ app = Flask(__name__)
 CORS(app)  # 允許跨域請求
 
 # 初始化 Firebase Admin
-cred = credentials.Certificate("yaoyaoproject-88907-firebase-adminsdk-fbsvc-2055cc5b02.json")
+cred = credentials.Certificate("yaoyaoproject-88907-firebase-adminsdk-fbsvc-e65f9829cc.json")
 firebase_admin.initialize_app(cred)
 
 # 連接 Firestore
