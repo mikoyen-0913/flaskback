@@ -1,3 +1,6 @@
+#api=http://127.0.0.1:5000/加功能
+
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
@@ -8,7 +11,7 @@ app = Flask(__name__)
 CORS(app)  # 允許跨域請求
 
 # 初始化 Firebase Admin
-cred = credentials.Certificate("yaoyaoproject-88907-firebase-adminsdk-fbsvc-e65f9829cc.json")
+cred = credentials.Certificate("yaoyaoproject-88907-firebase-adminsdk-fbsvc-2055cc5b02.json")
 firebase_admin.initialize_app(cred)
 
 # 連接 Firestore
