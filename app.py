@@ -6,6 +6,9 @@ from flask_cors import CORS
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+CORS(app, resources={r"/*": {"origins": "*"}}) # ✅ 確保允許所有請求
+
+
 # 初始化 Flask 應用
 app = Flask(__name__)
 CORS(app)  # 允許跨域請求
@@ -22,6 +25,16 @@ flavors_collection = "flavors"  # 口味集合
 @app.route('/')
 def home():
     return "紅豆餅店庫存管理系統後端運行中..."
+
+@app.route('/get_ingredients', methods=['GET'])
+def get_ingredients():
+    try:
+        ingredients_ref = db.collection("ingredients").stream()
+        ingredients = [{"id": ing.id, **ing.to_dict()} for ing in ingredients_ref]
+        return jsonify({"ingredients": ingredients}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # 新增食材 API
 @app.route('/add_ingredient', methods=['POST'])
