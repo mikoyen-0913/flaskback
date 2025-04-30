@@ -9,7 +9,8 @@ from routes.menus import menus_bp
 
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+
 
 # 註冊 Blueprint
 app.register_blueprint(ingredients_bp)
