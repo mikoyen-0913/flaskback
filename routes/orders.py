@@ -215,3 +215,36 @@ def revert_all_completed_orders():
         return jsonify({"message": "所有 done 訂單已復原為 pending"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+        # ✅ 新增：將訂單移至 completed_orders 並從 orders 刪除
+@orders_bp.route('/move_to_completed/<order_id>', methods=['POST'])
+def move_to_completed(order_id):
+    try:
+        order_ref = db.collection(orders_collection).document(order_id)
+        order_data = order_ref.get().to_dict()
+
+        if not order_data:
+            return jsonify({"error": "訂單不存在"}), 404
+
+        # 寫入 completed_orders 並刪除原始
+        db.collection("completed_orders").document(order_id).set(order_data)
+        order_ref.delete()
+
+        return jsonify({"message": "訂單已移動至 completed_orders"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ✅ 新增：查詢所有 completed_orders 資料
+@orders_bp.route('/get_completed_orders', methods=['GET'])
+def get_completed_orders():
+    try:
+        docs = db.collection("completed_orders").order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        orders = []
+        for doc in docs:
+            order = doc.to_dict()
+            order['id'] = doc.id
+            orders.append(order)
+        return jsonify({"orders": orders}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
