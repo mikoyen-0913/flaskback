@@ -16,3 +16,4 @@ firebase_admin.initialize_app(cred)
 
 # ✅ 建立 Firestore 實例
 db = firestore.client()
+

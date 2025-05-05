@@ -13,7 +13,6 @@ def place_order():
     try:
         data = request.get_json()
 
-        # 如果是單品項就轉成 items 陣列格式
         if "menu_id" in data and "quantity" in data:
             data = {
                 "items": [
@@ -26,7 +25,7 @@ def place_order():
 
         items = data.get("items")
         if not isinstance(items, list) or not items:
-            return jsonify({"error": "items 欄位需為陣列且不可為空"}), 400
+            return jsonify({"error": "items 欄位須為陣列且不可為空"}), 400
 
         order_items = []
         total_price = 0
@@ -35,7 +34,7 @@ def place_order():
             menu_id = item.get("menu_id")
             quantity = item.get("quantity")
             if not menu_id or not isinstance(quantity, (int, float)):
-                return jsonify({"error": "每項需包含 menu_id 和 quantity"}), 400
+                return jsonify({"error": "每項須包含 menu_id 和 quantity"}), 400
 
             menu_doc = db.collection(menus_collection).document(menu_id).get()
             if not menu_doc.exists:
@@ -57,7 +56,8 @@ def place_order():
         order_data = {
             "items": order_items,
             "total_price": total_price,
-            "timestamp": datetime.datetime.utcnow()
+            "timestamp": datetime.datetime.utcnow(),
+            "status": "pending"  # 預設為未完成
         }
 
         doc_ref = db.collection(orders_collection).add(order_data)
@@ -70,7 +70,7 @@ def place_order():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 查詢所有訂單（統一格式）
+# ✅ 查詢所有訂單
 @orders_bp.route('/get_orders', methods=['GET'])
 def get_orders():
     try:
@@ -78,7 +78,6 @@ def get_orders():
         orders = []
         for doc in orders_ref:
             data = doc.to_dict()
-            # 確保所有訂單都有 items 陣列
             if "items" not in data or not isinstance(data["items"], list):
                 if all(k in data for k in ("menu_id", "menu_name", "quantity", "unit_price", "total_price")):
                     data["items"] = [
@@ -124,18 +123,95 @@ def delete_multiple_orders():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 清理不符合 items 格式的舊訂單資料
-@orders_bp.route('/clean_invalid_orders', methods=['POST'])
-def clean_invalid_orders():
+# ✅ 更新訂單
+@orders_bp.route('/update_order/<order_id>', methods=['PUT'])
+def update_order(order_id):
     try:
-        orders_ref = db.collection(orders_collection).stream()
-        deleted = 0
-        for doc in orders_ref:
-            data = doc.to_dict()
-            if "items" not in data or not isinstance(data["items"], list):
-                db.collection(orders_collection).document(doc.id).delete()
-                deleted += 1
+        data = request.get_json()
+        items = data.get("items")
 
-        return jsonify({"message": f"已清理 {deleted} 筆不合法訂單資料"}), 200
+        if not isinstance(items, list) or not items:
+            return jsonify({"error": "items 資料格式錯誤"}), 400
+
+        order_items = []
+        total_price = 0
+
+        for item in items:
+            menu_name = item.get("menu_name")
+            quantity = item.get("quantity")
+
+            if not menu_name or not isinstance(quantity, (int, float)):
+                return jsonify({"error": "每項須包含 menu_name 和 quantity"}), 400
+
+            menus_ref = db.collection(menus_collection).where("name", "==", menu_name).stream()
+            menu_doc = next(menus_ref, None)
+
+            if not menu_doc:
+                return jsonify({"error": f"找不到菜單項目: {menu_name}"}), 404
+
+            menu_data = menu_doc.to_dict()
+            unit_price = menu_data["price"]
+            subtotal = unit_price * quantity
+
+            order_items.append({
+                "menu_id": menu_doc.id,
+                "menu_name": menu_name,
+                "unit_price": unit_price,
+                "quantity": quantity,
+                "subtotal": subtotal
+            })
+
+            total_price += subtotal
+
+        db.collection(orders_collection).document(order_id).update({
+            "items": order_items,
+            "total_price": total_price,
+            "timestamp": datetime.datetime.utcnow()
+        })
+
+        return jsonify({"message": "訂單更新成功"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ 完成單筆訂單
+@orders_bp.route('/complete_order/<order_id>', methods=['POST'])
+def complete_order(order_id):
+    try:
+        db.collection(orders_collection).document(order_id).update({
+            "status": "done"
+        })
+        return jsonify({"message": "訂單已正常記錄為 done"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ 批次完成多筆訂單
+@orders_bp.route('/complete_multiple_orders', methods=['POST'])
+def complete_multiple_orders():
+    try:
+        data = request.get_json()
+        ids = data.get("ids", [])
+        if not isinstance(ids, list):
+            return jsonify({"error": "ids 應為陣列"}), 400
+
+        for order_id in ids:
+            db.collection(orders_collection).document(order_id).update({
+                "status": "done"
+            })
+
+        return jsonify({"message": f"已完成 {len(ids)} 筆訂單"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ 復原所有完成的訂單
+@orders_bp.route('/revert_all_completed_orders', methods=['POST'])
+def revert_all_completed_orders():
+    try:
+        orders_ref = db.collection(orders_collection).where("status", "==", "done").stream()
+        for doc in orders_ref:
+            db.collection(orders_collection).document(doc.id).update({
+                "status": "pending"
+            })
+
+        return jsonify({"message": "所有 done 訂單已復原為 pending"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
