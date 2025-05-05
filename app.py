@@ -22,4 +22,5 @@ def home():
     return "紅豆餅店庫存管理系統後端運行中..."
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, use_reloader=False)
+
