@@ -5,7 +5,7 @@ from routes.ingredients import ingredients_bp
 from routes.flavors import flavors_bp
 from routes.orders import orders_bp
 from routes.menus import menus_bp
-
+from routes.auth import auth_bp  # 根據你的目錄結構調整
 
 
 app = Flask(__name__)
@@ -17,6 +17,7 @@ app.register_blueprint(ingredients_bp)
 app.register_blueprint(flavors_bp)
 app.register_blueprint(orders_bp)
 app.register_blueprint(menus_bp)
+app.register_blueprint(auth_bp)
 
 @app.route('/')
 def home():
