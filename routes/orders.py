@@ -2,7 +2,8 @@ import datetime
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 from firebase_config import db
-from auth import token_required  # ✅ 匯入驗證裝飾器
+from routes.auth import token_required
+
 
 orders_bp = Blueprint('orders', __name__)
 menus_collection = "menus"

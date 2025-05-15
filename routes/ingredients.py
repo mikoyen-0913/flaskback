@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from firebase_config import db
-from auth import token_required  # ✅ 匯入 token 驗證裝飾器
+from routes.auth import token_required
+
 
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
