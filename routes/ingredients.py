@@ -1,11 +1,13 @@
 from flask import Blueprint, request, jsonify
 from firebase_config import db
+from auth import token_required  # ✅ 匯入 token 驗證裝飾器
 
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
 
-# ✅ 取得所有食材
+# ✅ 取得所有食材（需登入）
 @ingredients_bp.route('/get_ingredients', methods=['GET'])
+@token_required
 def get_ingredients():
     try:
         ingredients_ref = db.collection(ingredients_collection).stream()
@@ -14,8 +16,9 @@ def get_ingredients():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 新增食材
+# ✅ 新增食材（需登入）
 @ingredients_bp.route('/add_ingredient', methods=['POST'])
+@token_required
 def add_ingredient():
     try:
         data = request.get_json()
@@ -26,8 +29,9 @@ def add_ingredient():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 更新食材
+# ✅ 更新食材（需登入）
 @ingredients_bp.route('/update_ingredient/<ingredient_id>', methods=['PUT'])
+@token_required
 def update_ingredient(ingredient_id):
     try:
         data = request.get_json()
@@ -36,8 +40,9 @@ def update_ingredient(ingredient_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 刪除食材
+# ✅ 刪除食材（需登入）
 @ingredients_bp.route('/delete_ingredient/<ingredient_id>', methods=['DELETE'])
+@token_required
 def delete_ingredient(ingredient_id):
     try:
         db.collection(ingredients_collection).document(ingredient_id).delete()
@@ -45,8 +50,9 @@ def delete_ingredient(ingredient_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 🔵 新增：補貨功能
+# ✅ 補貨功能（需登入）
 @ingredients_bp.route('/restock_ingredients', methods=['POST'])
+@token_required
 def restock_ingredients():
     try:
         data = request.get_json()  # { "abc123": { "restock": 5 }, ... }

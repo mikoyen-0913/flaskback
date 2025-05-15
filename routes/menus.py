@@ -1,11 +1,13 @@
 from flask import Blueprint, request, jsonify
 from firebase_config import db
+from auth import token_required  # ✅ 匯入 token 驗證裝飾器
 
 menus_bp = Blueprint('menus', __name__)
 menus_collection = "menus"
 
-# ✅ 取得所有菜單項目
+# ✅ 取得所有菜單項目（需要登入）
 @menus_bp.route('/get_menus', methods=['GET'])
+@token_required
 def get_menus():
     try:
         menus_ref = db.collection(menus_collection).stream()
@@ -14,8 +16,9 @@ def get_menus():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 新增菜單項目
+# ✅ 新增菜單項目（需要登入）
 @menus_bp.route('/add_menu', methods=['POST'])
+@token_required
 def add_menu():
     try:
         data = request.get_json()
@@ -27,8 +30,9 @@ def add_menu():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 更新菜單項目
+# ✅ 更新菜單項目（需要登入）
 @menus_bp.route('/update_menu/<menu_id>', methods=['PUT'])
+@token_required
 def update_menu(menu_id):
     try:
         data = request.get_json()
@@ -37,8 +41,9 @@ def update_menu(menu_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 刪除菜單項目
+# ✅ 刪除菜單項目（需要登入）
 @menus_bp.route('/delete_menu/<menu_id>', methods=['DELETE'])
+@token_required
 def delete_menu(menu_id):
     try:
         db.collection(menus_collection).document(menu_id).delete()

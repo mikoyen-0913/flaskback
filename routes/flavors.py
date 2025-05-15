@@ -1,10 +1,13 @@
 from flask import Blueprint, request, jsonify
 from firebase_config import db
+from auth import token_required  # ✅ 從 auth.py 匯入裝飾器
 
 flavors_bp = Blueprint('flavors', __name__)
 flavors_collection = "flavors"
 
+# ✅ 新增口味（需要登入）
 @flavors_bp.route('/add_flavor', methods=['POST'])
+@token_required
 def add_flavor():
     try:
         data = request.get_json()
@@ -15,7 +18,9 @@ def add_flavor():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ 更新口味（需要登入）
 @flavors_bp.route('/update_flavor/<flavor_id>', methods=['PUT'])
+@token_required
 def update_flavor(flavor_id):
     try:
         data = request.get_json()
@@ -24,7 +29,9 @@ def update_flavor(flavor_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ 刪除口味（需要登入）
 @flavors_bp.route('/delete_flavor/<flavor_id>', methods=['DELETE'])
+@token_required
 def delete_flavor(flavor_id):
     try:
         db.collection(flavors_collection).document(flavor_id).delete()
@@ -32,7 +39,9 @@ def delete_flavor(flavor_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ 取得所有口味（需要登入）
 @flavors_bp.route('/get_flavors', methods=['GET'])
+@token_required
 def get_flavors():
     try:
         flavors_ref = db.collection(flavors_collection).stream()
