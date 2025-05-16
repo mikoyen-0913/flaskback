@@ -9,7 +9,6 @@ orders_bp = Blueprint('orders', __name__)
 menus_collection = "menus"
 orders_collection = "orders"
 
-# ✅ 建立訂單（需要登入）
 @orders_bp.route('/place_order', methods=['POST'])
 @token_required
 def place_order():
@@ -56,10 +55,12 @@ def place_order():
             })
             total_price += subtotal
 
+        now = datetime.datetime.utcnow()
         order_data = {
             "items": order_items,
             "total_price": total_price,
-            "timestamp": datetime.datetime.utcnow(),
+            "created_at": now,          # ✅ 用於排序
+            "timestamp": now,           # ✅ 最後更新時間（可選）
             "status": "pending"
         }
 
@@ -73,12 +74,14 @@ def place_order():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # ✅ 查詢所有訂單（需要登入）
 @orders_bp.route('/get_orders', methods=['GET'])
 @token_required
 def get_orders():
     try:
-        orders_ref = db.collection(orders_collection).order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        # ✅ 用 created_at 排序，確保新增的在後面，編輯不動
+        orders_ref = db.collection(orders_collection).order_by("created_at").stream()
         orders = []
         for doc in orders_ref:
             data = doc.to_dict()
@@ -171,12 +174,13 @@ def update_order(order_id):
         db.collection(orders_collection).document(order_id).update({
             "items": order_items,
             "total_price": total_price,
-            "timestamp": datetime.datetime.utcnow()
+            "timestamp": datetime.datetime.utcnow()  # ✅ 僅更新 timestamp，不影響 created_at
         })
 
         return jsonify({"message": "訂單更新成功"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # ✅ 完成單筆訂單（需要登入）
 @orders_bp.route('/complete_order/<order_id>', methods=['POST'])
@@ -229,12 +233,20 @@ def move_to_completed(order_id):
         if not order_data:
             return jsonify({"error": "訂單不存在"}), 404
 
+        # ✅ 新增完成時間欄位
+        order_data["completed_at"] = datetime.datetime.utcnow()
+
+        # ✅ 搬移到 completed_orders 集合
         db.collection("completed_orders").document(order_id).set(order_data)
+
+        # ✅ 刪除原始訂單
         order_ref.delete()
 
         return jsonify({"message": "訂單已移至 completed_orders"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
 
 # ✅ 查詢 completed_orders（需要登入）
 @orders_bp.route('/get_completed_orders', methods=['GET'])
