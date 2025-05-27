@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 from firebase_config import db
 from routes.auth import token_required
 
-
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
 
@@ -23,9 +22,22 @@ def get_ingredients():
 def add_ingredient():
     try:
         data = request.get_json()
-        if not data.get("name") or "quantity" not in data or "price" not in data or "unit" not in data:
-            return jsonify({"error": "缺少必要字段"}), 400
-        doc_ref = db.collection(ingredients_collection).add(data)
+
+        # 驗證必要欄位
+        required_fields = ["name", "quantity", "unit", "price", "expiration_date"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"缺少必要欄位：{field}"}), 400
+
+        # 新增資料
+        doc_ref = db.collection(ingredients_collection).add({
+            "name": data["name"],
+            "quantity": data["quantity"],
+            "unit": data["unit"],
+            "price": data["price"],
+            "expiration_date": data["expiration_date"]
+        })
+
         return jsonify({"message": "食材新增成功", "doc_id": doc_ref[1].id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -36,7 +48,15 @@ def add_ingredient():
 def update_ingredient(ingredient_id):
     try:
         data = request.get_json()
-        db.collection(ingredients_collection).document(ingredient_id).update(data)
+
+        # 可選擇更新欄位（後端不強制驗證所有欄位）
+        updatable_fields = ["name", "quantity", "unit", "price", "expiration_date"]
+        update_data = {key: data[key] for key in updatable_fields if key in data}
+
+        if not update_data:
+            return jsonify({"error": "沒有提供更新資料"}), 400
+
+        db.collection(ingredients_collection).document(ingredient_id).update(update_data)
         return jsonify({"message": "食材更新成功"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
