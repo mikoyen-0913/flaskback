@@ -57,6 +57,7 @@ def signup():
         store_name = data.get('storeName', '').strip()
         email = data.get('email', '').strip()
         phone = data.get('phone', '').strip()
+        address = data.get('address', '').strip()  # ✅ 新增地址欄位
         role = data.get('role') or 'staff'
 
         if not username: return jsonify({"error": "帳號不可為空"}), 400
@@ -64,24 +65,32 @@ def signup():
         if not store_name: return jsonify({"error": "店名不可為空"}), 400
         if not email: return jsonify({"error": "Email 不可為空"}), 400
         if not phone: return jsonify({"error": "手機號碼不可為空"}), 400
+        if not address: return jsonify({"error": "地址不可為空"}), 400  # ✅ 加入地址驗證
 
-        existing = db.collection(users_collection).where('username', '==', username).stream()
-        if any(existing): return jsonify({"error": "帳號已存在"}), 409
+        # 檢查帳號是否已經存在
+        existing_user = db.collection(users_collection).document(username).get()
+        if existing_user.exists:
+            return jsonify({"error": "帳號已存在"}), 409
 
+        # 儲存資料
         user_data = {
             "username": username,
             "password_hash": hash_password(password),
             "store_name": store_name,
             "email": email,
             "phone": phone,
+            "address": address,  # ✅ 加入地址
             "role": role
         }
 
-        db.collection(users_collection).add(user_data)
+        # 使用 username 作為 Document ID
+        db.collection(users_collection).document(username).set(user_data)
+
         return jsonify({"message": "註冊成功"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # ✅ 登入 API
 @auth_bp.route('/signin', methods=['POST'])
@@ -94,14 +103,13 @@ def signin():
         if not username: return jsonify({"error": "請輸入帳號"}), 400
         if not password: return jsonify({"error": "請輸入密碼"}), 400
 
-        password_hash = hash_password(password)
-        query = db.collection(users_collection).where('username', '==', username).limit(1).stream()
-        user_doc = next(query, None)
-        if not user_doc:
+        # 使用 username 作為 Document ID 查詢
+        user_doc = db.collection(users_collection).document(username).get()
+        if not user_doc.exists:
             return jsonify({"error": "查無帳號，請重新輸入"}), 401
 
         user = user_doc.to_dict()
-        if user["password_hash"] != password_hash:
+        if user["password_hash"] != hash_password(password):
             return jsonify({"error": "密碼錯誤"}), 401
 
         token = generate_token({
@@ -120,6 +128,7 @@ def signin():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # ✅ 取得所有使用者資訊 API（需要 Token）
 @auth_bp.route('/users', methods=['GET'])
 @token_required
@@ -131,7 +140,7 @@ def get_all_users():
         for doc in users_ref:
             user = doc.to_dict()
             user.pop("password_hash", None)  # 移除敏感欄位
-            user["id"] = doc.id
+            user["id"] = doc.id  # 這裡的 id 是 Firestore 的 Document ID，即 username
             users.append(user)
 
         return jsonify({"users": users}), 200
