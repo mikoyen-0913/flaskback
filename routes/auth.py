@@ -114,7 +114,8 @@ def signin():
 
         token = generate_token({
             "username": user["username"],
-            "role": user["role"]
+            "role": user["role"],  # 保持 role 欄位
+            "store_name": user["store_name"]  # 新增 store_name 至 token
         })
 
         return jsonify({
@@ -124,26 +125,6 @@ def signin():
             "role": user["role"],
             "store_name": user.get("store_name")
         }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ✅ 取得所有使用者資訊 API（需要 Token）
-@auth_bp.route('/users', methods=['GET'])
-@token_required
-def get_all_users():
-    try:
-        users_ref = db.collection(users_collection).stream()
-        users = []
-
-        for doc in users_ref:
-            user = doc.to_dict()
-            user.pop("password_hash", None)  # 移除敏感欄位
-            user["id"] = doc.id  # 這裡的 id 是 Firestore 的 Document ID，即 username
-            users.append(user)
-
-        return jsonify({"users": users}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
