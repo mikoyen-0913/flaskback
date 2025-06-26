@@ -51,3 +51,13 @@ def delete_menu(menu_id):
         return jsonify({"message": "菜單刪除成功"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ✅ 公開菜單查詢（不需登入）
+@menus_bp.route('/public_menus', methods=['GET'])
+def public_menus():
+    try:
+        menus_ref = db.collection(menus_collection).stream()
+        menus = [{"menu_id": doc.id, **doc.to_dict()} for doc in menus_ref]
+        return jsonify({"menus": menus}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
