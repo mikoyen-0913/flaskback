@@ -56,6 +56,9 @@ def public_menus():
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ 啟動 Flask App
 if __name__ == '__main__':
+    with app.test_request_context():
+        print("✅ Registered Routes:")
+        print(app.url_map)
+
     app.run(debug=True, use_reloader=False)

@@ -17,3 +17,7 @@ firebase_admin.initialize_app(cred)
 # ✅ 建立 Firestore 實例
 db = firestore.client()
 
+# ✅ 建立 Firestore 實例
+db = firestore.client()
+
+print("✅ Firebase 已連線至專案：", cred.project_id)  # ✅ Debug 印出 project_id
