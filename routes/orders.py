@@ -245,3 +245,57 @@ def get_completed_orders():
         return jsonify({"orders": orders}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ✅ 公開版訂單下單（不需登入）
+@orders_bp.route('/public_place_order', methods=['POST'])
+def public_place_order():
+    try:
+        data = request.get_json()
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return jsonify({"error": "items 欄位必須為陣列且不可為空"}), 400
+
+        order_items = []
+        total_price = 0
+
+        for item in items:
+            menu_id = item.get("menu_id")
+            quantity = item.get("quantity")
+            if not menu_id or not isinstance(quantity, (int, float)):
+                return jsonify({"error": "每個項目必須含有 menu_id 和 quantity"}), 400
+
+            menu_doc = db.collection("menus").document(menu_id).get()
+            if not menu_doc.exists:
+                return jsonify({"error": f"找不到菜單 {menu_id}"}), 404
+
+            menu_data = menu_doc.to_dict()
+            unit_price = menu_data["price"]
+            subtotal = unit_price * quantity
+
+            order_items.append({
+                "menu_id": menu_id,
+                "menu_name": menu_data["name"],
+                "unit_price": unit_price,
+                "quantity": quantity,
+                "subtotal": subtotal
+            })
+            total_price += subtotal
+
+        now = datetime.datetime.utcnow()
+        order_data = {
+            "items": order_items,
+            "total_price": total_price,
+            "created_at": now,
+            "timestamp": now,
+            "status": "pending"
+        }
+
+        doc_ref = db.collection("orders").add(order_data)
+        return jsonify({
+            "message": "訂單成立成功",
+            "order_id": doc_ref[1].id,
+            "order": order_data
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
