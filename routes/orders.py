@@ -228,7 +228,7 @@ def complete_order(order_id):
                     db.collection("stores").document(store_name).collection("ingredients").document(ing_doc.id).update({
                         "quantity": Increment(-adjusted_amount * quantity)
                     })
-
+        order_data["used_in_inventory_refresh"] = False 
         order_data["completed_at"] = firestore.SERVER_TIMESTAMP
         db.collection("stores").document(store_name).collection("completed_orders").document(order_id).set(order_data)
         order_ref.delete()

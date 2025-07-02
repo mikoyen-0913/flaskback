@@ -162,3 +162,84 @@ def restock_ingredients():
         return jsonify({"message": "補貨成功"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@ingredients_bp.route('/refresh_inventory_by_sales', methods=['POST'])
+@token_required
+def refresh_inventory_by_sales():
+    try:
+        store_name = request.user.get("store_name")
+        completed_orders_ref = db.collection("stores").document(store_name).collection("completed_orders")
+        orders = completed_orders_ref.where("used_in_inventory_refresh", "==", False).stream()
+
+        sales_count = {}
+        processed_ids = []
+
+        # 統計所有已完成未處理訂單的 menu_name 賣出數量
+        for doc in orders:
+            order = doc.to_dict()
+            processed_ids.append(doc.id)
+            for item in order.get("items", []):
+                name = item.get("menu_name")
+                qty = item.get("quantity", 0)
+                if name in sales_count:
+                    sales_count[name] += qty
+                else:
+                    sales_count[name] = qty
+
+        # 讀取 recipes 並換算成食材需求量
+        UNIT_ALIAS = {"g": "克", "kg": "克", "ml": "毫升", "l": "毫升", "公克": "克", "公升": "毫升"}
+        MULTIPLIER = {("kg", "克"): 1000, ("l", "毫升"): 1000}
+
+        def normalize_unit(u): return UNIT_ALIAS.get(u.strip().lower(), u.strip())
+        def convert_amount(ingredient_unit, recipe_unit, amount):
+            key = (ingredient_unit, recipe_unit)
+            if key in MULTIPLIER:
+                return amount / MULTIPLIER[key]
+            elif (recipe_unit, ingredient_unit) in MULTIPLIER:
+                return amount * MULTIPLIER[(recipe_unit, ingredient_unit)]
+            return amount
+
+        ingredient_deduction = {}
+
+        for menu_name, total_qty in sales_count.items():
+            recipe_doc = db.collection("recipes").document(menu_name).get()
+            if not recipe_doc.exists:
+                continue
+            recipe = recipe_doc.to_dict()
+            for ing_name, detail in recipe.items():
+                recipe_amt = detail.get("amount", 0)
+                recipe_unit = normalize_unit(detail.get("unit", ""))
+
+                ing_query = db.collection("stores").document(store_name).collection("ingredients").where("name", "==", ing_name).limit(1).stream()
+                for ing_doc in ing_query:
+                    ing_id = ing_doc.id
+                    ing_data = ing_doc.to_dict()
+                    ing_unit = normalize_unit(ing_data.get("unit", ""))
+
+                    if recipe_unit != ing_unit:
+                        try:
+                            adjusted_amt = convert_amount(ing_unit, recipe_unit, recipe_amt)
+                        except:
+                            return jsonify({"error": f"{ing_name} 單位不符且無法轉換"}), 400
+                    else:
+                        adjusted_amt = recipe_amt
+
+                    final_deduction = adjusted_amt * total_qty
+                    ingredient_deduction[ing_id] = ingredient_deduction.get(ing_id, 0) + final_deduction
+
+        # 更新 ingredients 的數量
+        for ing_id, deduction in ingredient_deduction.items():
+            ing_ref = db.collection("stores").document(store_name).collection("ingredients").document(ing_id)
+            ing_ref.update({"quantity": firestore.Increment(-deduction)})
+
+        # 將處理過的 completed_orders 記錄為 used
+        for doc_id in processed_ids:
+            completed_orders_ref.document(doc_id).update({"used_in_inventory_refresh": True})
+
+        return jsonify({
+            "message": "即時庫存已更新",
+            "deducted_ingredients": ingredient_deduction
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
