@@ -260,13 +260,36 @@ def get_completed_orders():
 def public_place_order():
     try:
         data = request.get_json()
+        store_name = data.get("store_name")
         items = data.get("items")
+
+        if not store_name:
+            return jsonify({"error": "缺少 store_name"}), 400
         if not isinstance(items, list) or not items:
             return jsonify({"error": "items 欄位必須為陣列且不可為空"}), 400
 
+        now = datetime.datetime.utcnow()
+        date_str = now.strftime("%Y%m%d")
+        counter_doc_ref = db.collection("stores").document(store_name).collection("daily_counter").document(date_str)
+
+        # ✅ 建立 Transaction 物件
+        transaction = db.transaction()
+
+        # ✅ 宣告交易函式
+        @firestore.transactional
+        def increment_order_number(transaction):
+            snapshot = counter_doc_ref.get(transaction=transaction)
+            current = snapshot.to_dict().get("count", 0) if snapshot.exists else 0
+            next_number = current + 1
+            transaction.set(counter_doc_ref, {"count": next_number})
+            return next_number
+
+        # ✅ 執行 Transaction
+        order_number = increment_order_number(transaction)
+
+        # 🔄 建立訂單內容（略）
         order_items = []
         total_price = 0
-
         for item in items:
             menu_id = item.get("menu_id")
             quantity = item.get("quantity")
@@ -280,6 +303,7 @@ def public_place_order():
             menu_data = menu_doc.to_dict()
             unit_price = menu_data["price"]
             subtotal = unit_price * quantity
+            total_price += subtotal
 
             order_items.append({
                 "menu_id": menu_id,
@@ -288,10 +312,9 @@ def public_place_order():
                 "quantity": quantity,
                 "subtotal": subtotal
             })
-            total_price += subtotal
 
-        now = datetime.datetime.utcnow()
         order_data = {
+            "order_number": order_number,
             "items": order_items,
             "total_price": total_price,
             "created_at": now,
@@ -299,12 +322,15 @@ def public_place_order():
             "status": "pending"
         }
 
-        doc_ref = db.collection("orders").add(order_data)
+        doc_ref = db.collection("stores").document(store_name).collection("orders").add(order_data)
+
         return jsonify({
             "message": "訂單成立成功",
             "order_id": doc_ref[1].id,
+            "order_number": order_number,
             "order": order_data
         }), 200
 
     except Exception as e:
+        print("❌ 錯誤：", str(e))
         return jsonify({"error": str(e)}), 500
