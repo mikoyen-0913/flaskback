@@ -35,62 +35,73 @@ def get_ingredients():
 @token_required
 def add_ingredient():
     try:
-        # 檢查是否為 developer 權限
+        # ✅ 權限檢查
         if request.user.get("role") != "developer":
             return jsonify({"error": "無權限新增食材"}), 403
 
-        # 解析前端傳來的資料
-        data = request.get_json()
-        print("接收到的新增食材資料:", data)
+        # ✅ 資料驗證
+        data_list = request.get_json()
+        if not isinstance(data_list, list):
+            return jsonify({"error": "請傳入 JSON 陣列"}), 400
 
-        # 必要欄位驗證
-        required_fields = ["name", "quantity", "unit", "price", "expiration_date"]
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"缺少必要欄位：{field}"}), 400
-
-        # 檢查單位是否合法
-        allowed_units = ["克", "毫升"]
-        if data["unit"] not in allowed_units:
-            return jsonify({"error": "無效的單位，請選擇 '克' 或 '毫升'"}), 400
-
-        # 取得店名
         store_name = request.user.get("store_name")
+        allowed_units = ["克", "毫升"]
+        added_ids = []
 
-        # 寫入 Firestore
-        doc_ref, _ = db.collection("stores").document(store_name).collection("ingredients").add({
-            "name": data["name"],
-            "quantity": data["quantity"],
-            "unit": data["unit"],
-            "price": data["price"],
-            "expiration_date": data["expiration_date"]
-        })
+        # ✅ 一筆一筆新增資料
+        for idx, data in enumerate(data_list):
+            required_fields = ["name", "quantity", "unit", "price", "expiration_date"]
+            for field in required_fields:
+                if field not in data:
+                    return jsonify({"error": f"第 {idx+1} 筆資料缺少欄位：{field}"}), 400
 
-        # ✅ 新增成功後重新讀取所有食材
+            if data["unit"] not in allowed_units:
+                return jsonify({"error": f"第 {idx+1} 筆資料單位錯誤，僅支援 '克' 或 '毫升'"}), 400
+
+            # ✅ 新增到 Firestore
+            doc_ref, _ = db.collection("stores").document(store_name).collection("ingredients").add({
+                "name": data.get("name"),
+                "quantity": data.get("quantity"),
+                "unit": data.get("unit"),
+                "price": data.get("price"),
+                "expiration_date": data.get("expiration_date")
+            })
+            added_ids.append(doc_ref.id)
+
+        # ✅ 撈出所有資料
         ingredients = []
         ingredients_ref = db.collection("stores").document(store_name).collection("ingredients").stream()
-        for ing in ingredients_ref:
+        for doc in ingredients_ref:
             try:
-                ing_dict = ing.to_dict()
+                ing_dict = doc.to_dict()
+                exp = ing_dict.get("expiration_date")
+                # 安全轉換 expiration_date 為字串
+                if hasattr(exp, "isoformat"):
+                    expiration_str = exp.isoformat()
+                else:
+                    expiration_str = str(exp) if exp else "無效日期"
+
+                # 加入清單
                 ingredients.append({
-                    "id": ing.id,
-                    "name": ing_dict.get("name"),
-                    "quantity": ing_dict.get("quantity"),
-                    "unit": ing_dict.get("unit"),
-                    "price": ing_dict.get("price"),
-                    "expiration_date": ing_dict.get("expiration_date").isoformat()
+                    "id": doc.id,
+                    "name": ing_dict.get("name", ""),
+                    "quantity": ing_dict.get("quantity", 0),
+                    "unit": ing_dict.get("unit", ""),
+                    "price": ing_dict.get("price", 0),
+                    "expiration_date": expiration_str
                 })
             except Exception as e:
-                print(f"⚠️ 無法解析食材 {ing.id}: {e}")
+                print(f"⚠️ 無法解析食材 document：{str(e)}")
+                continue  # 避免中斷整體處理
 
         return jsonify({
-            "message": "食材新增成功",
-            "doc_id": doc_ref.id,
+            "message": f"成功新增 {len(added_ids)} 筆食材",
+            "added_ids": added_ids,
             "ingredients": ingredients
         }), 200
 
     except Exception as e:
-        print("錯誤訊息:", str(e))
+        print("❌ 錯誤訊息:", str(e))
         return jsonify({"error": str(e)}), 500
 
 # ✅ 更新食材
