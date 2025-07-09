@@ -230,6 +230,7 @@ def complete_order(order_id):
                     })
         order_data["used_in_inventory_refresh"] = False 
         order_data["completed_at"] = firestore.SERVER_TIMESTAMP
+        order_data["timestamp"] = firestore.SERVER_TIMESTAMP
         db.collection("stores").document(store_name).collection("completed_orders").document(order_id).set(order_data)
         order_ref.delete()
 
@@ -334,3 +335,34 @@ def public_place_order():
     except Exception as e:
         print("❌ 錯誤：", str(e))
         return jsonify({"error": str(e)}), 500
+
+@orders_bp.route("/get_sales_summary", methods=["GET"])
+@token_required
+def get_sales_summary():
+    try:
+        store_name = request.user.get("store_name")
+        days = int(request.args.get("days", 7))  # 可指定 7、14、30
+        now = datetime.datetime.utcnow()
+        start_date = now - datetime.timedelta(days=days)
+
+        completed_ref = db.collection("stores").document(store_name).collection("completed_orders")
+        docs = completed_ref.where("timestamp", ">=", start_date).stream()
+
+        sales_by_date = {}
+
+        for doc in docs:
+            data = doc.to_dict()
+            ts = data.get("timestamp")
+            if not ts:
+                continue
+            date_key = ts.strftime("%Y-%m-%d")
+            sales_by_date[date_key] = sales_by_date.get(date_key, 0) + data.get("total_price", 0)
+
+        # 依日期排序
+        sorted_data = sorted(sales_by_date.items())
+        result = [{"date": k, "total": v} for k, v in sorted_data]
+
+        return jsonify({"summary": result}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+

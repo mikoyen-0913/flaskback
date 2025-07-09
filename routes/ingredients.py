@@ -1,6 +1,8 @@
 from flask import Blueprint, request, jsonify
 from firebase_config import db
 from routes.auth import token_required
+from google.cloud import firestore
+
 
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
