@@ -56,11 +56,28 @@ def place_order():
                 "unit_price": unit_price,
                 "quantity": quantity,
                 "subtotal": subtotal
-            })
+                })
             total_price += subtotal
 
         now = datetime.datetime.utcnow()
+        date_str = now.strftime("%Y%m%d")
+        counter_doc_ref = db.collection("stores").document(store_name).collection("daily_counter").document(date_str)
+
+        # 🔢 產生 order_number（與 public_place_order 相同）
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def increment_order_number(transaction):
+            snapshot = counter_doc_ref.get(transaction=transaction)
+            current = snapshot.to_dict().get("count", 0) if snapshot.exists else 0
+            next_number = current + 1
+            transaction.set(counter_doc_ref, {"count": next_number})
+            return next_number
+
+        order_number = increment_order_number(transaction)
+
         order_data = {
+            "order_number": order_number,
             "items": order_items,
             "total_price": total_price,
             "created_at": now,
@@ -68,20 +85,20 @@ def place_order():
             "status": "pending"
         }
 
-        # ✅ 寫入 store_name 對應的 orders 子集合
+        # ✅ 寫入 store 對應的 orders 子集合
         doc_ref = db.collection("stores").document(store_name).collection("orders").add(order_data)
         print("✅ 建立訂單 ID:", doc_ref[1].id)
 
         return jsonify({
             "message": "訂單成立成功",
             "order_id": doc_ref[1].id,
+            "order_number": order_number,
             "order": order_data
         }), 200
 
     except Exception as e:
         print("❌ 錯誤：", str(e))
         return jsonify({"error": str(e)}), 500
-
 
 # ✅ 查詢所有訂單
 @orders_bp.route('/get_orders', methods=['GET'])
@@ -130,23 +147,23 @@ def update_order(order_id):
         total_price = 0
 
         for item in items:
-            menu_name = item.get("menu_name")
+            menu_id = item.get("menu_id")
             quantity = item.get("quantity")
-            if not menu_name or not isinstance(quantity, (int, float)):
-                return jsonify({"error": "每項必含 menu_name 和 quantity"}), 400
 
-            menus_ref = db.collection("stores").document(store_name).collection("menus").where("name", "==", menu_name).stream()
-            menu_doc = next(menus_ref, None)
-            if not menu_doc:
-                return jsonify({"error": f"找不到菜單: {menu_name}"}), 404
+            if not menu_id or not isinstance(quantity, (int, float)):
+                return jsonify({"error": "每項必含 menu_id 和 quantity"}), 400
+
+            menu_doc = db.collection("menus").document(menu_id).get()
+            if not menu_doc.exists:
+                return jsonify({"error": f"找不到菜單 ID: {menu_id}"}), 404
 
             menu_data = menu_doc.to_dict()
             unit_price = menu_data["price"]
             subtotal = unit_price * quantity
 
             order_items.append({
-                "menu_id": menu_doc.id,
-                "menu_name": menu_name,
+                "menu_id": menu_id,
+                "menu_name": menu_data["name"],
                 "unit_price": unit_price,
                 "quantity": quantity,
                 "subtotal": subtotal
@@ -228,6 +245,7 @@ def complete_order(order_id):
                     db.collection("stores").document(store_name).collection("ingredients").document(ing_doc.id).update({
                         "quantity": Increment(-adjusted_amount * quantity)
                     })
+        order_data["status"] = "completed"
         order_data["used_in_inventory_refresh"] = False 
         order_data["completed_at"] = firestore.SERVER_TIMESTAMP
         order_data["timestamp"] = firestore.SERVER_TIMESTAMP
@@ -238,6 +256,92 @@ def complete_order(order_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@orders_bp.route("/complete_multiple_orders", methods=["POST"])
+@token_required
+def complete_multiple_orders():
+    try:
+        store_name = request.user.get("store_name")
+        data = request.get_json()
+        ids = data.get("ids", [])
+
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"error": "請提供要完成的訂單 ID 陣列"}), 400
+
+        UNIT_ALIAS = {
+            "g": "克", "kg": "克", "ml": "毫升", "l": "毫升", "公克": "克", "公升": "毫升"
+        }
+
+        MULTIPLIER = {
+            ("kg", "克"): 1000,
+            ("l", "毫升"): 1000,
+        }
+
+        def normalize_unit(unit):
+            return UNIT_ALIAS.get(unit.strip().lower(), unit.strip())
+
+        def convert_amount(ingredient_unit, recipe_unit, amount):
+            key = (ingredient_unit, recipe_unit)
+            if key in MULTIPLIER:
+                return amount / MULTIPLIER[key]
+            elif (recipe_unit, ingredient_unit) in MULTIPLIER:
+                return amount * MULTIPLIER[(recipe_unit, ingredient_unit)]
+            return amount
+
+        for order_id in ids:
+            order_ref = db.collection("stores").document(store_name).collection("orders").document(order_id)
+            order_doc = order_ref.get()
+            if not order_doc.exists:
+                continue
+
+            order_data = order_doc.to_dict()
+            items = order_data.get("items", [])
+
+            for item in items:
+                menu_name = item.get("menu_name")
+                quantity = item.get("quantity", 1)
+
+                recipe_doc = db.collection("stores").document(store_name).collection("recipes").document(menu_name).get()
+                if not recipe_doc.exists:
+                    continue
+                recipe = recipe_doc.to_dict()
+
+                for ing_name, detail in recipe.items():
+                    amount = detail.get("amount")
+                    recipe_unit = normalize_unit(detail.get("unit"))
+
+                    ing_query = db.collection("stores").document(store_name).collection("ingredients").where("name", "==", ing_name).limit(1).stream()
+                    for ing_doc in ing_query:
+                        ing_data = ing_doc.to_dict()
+                        ingredient_unit = normalize_unit(ing_data.get("unit"))
+
+                        if recipe_unit != ingredient_unit:
+                            try:
+                                adjusted_amount = convert_amount(ingredient_unit, recipe_unit, amount)
+                            except:
+                                continue
+                        else:
+                            adjusted_amount = amount
+
+                        db.collection("stores").document(store_name).collection("ingredients").document(ing_doc.id).update({
+                            "quantity": Increment(-adjusted_amount * quantity)
+                        })
+
+            # ✅ 加上完成資訊與狀態
+            order_data["status"] = "completed"
+            order_data["used_in_inventory_refresh"] = False
+            order_data["completed_at"] = firestore.SERVER_TIMESTAMP
+            order_data["timestamp"] = firestore.SERVER_TIMESTAMP
+
+            # ✅ 搬移至 completed_orders
+            db.collection("stores").document(store_name).collection("completed_orders").document(order_id).set(order_data)
+            order_ref.delete()
+
+        return jsonify({"message": "多筆訂單完成成功"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 # ✅ 查詢已完成訂單
@@ -365,4 +469,3 @@ def get_sales_summary():
         return jsonify({"summary": result}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
