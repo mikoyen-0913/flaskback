@@ -3,7 +3,6 @@ from firebase_config import db
 from routes.auth import token_required
 from google.cloud import firestore
 
-
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
 
@@ -13,97 +12,66 @@ ingredients_collection = "ingredients"
 def get_ingredients():
     try:
         store_name = request.user.get("store_name")
-        ingredients = []
         ingredients_ref = db.collection("stores").document(store_name).collection("ingredients").stream()
-
-        for ing in ingredients_ref:
-            try:
-                ingredients.append({
-                    "id": ing.id,
-                    "name": ing.get("name"),
-                    "quantity": ing.get("quantity"),
-                    "unit": ing.get("unit"),
-                    "price": ing.get("price"),
-                    "expiration_date": str(ing.get("expiration_date"))  # 避免 DateTimeWithNanoseconds
-                })
-            except Exception as e:
-                print(f"⚠️ 食材解析錯誤：{e}")
-
+        ingredients = [{"id": ing.id, **ing.to_dict()} for ing in ingredients_ref]
         return jsonify({"ingredients": ingredients}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ 新增食材（單筆，合併相同名稱）
 @ingredients_bp.route('/add_ingredient', methods=['POST'])
 @token_required
 def add_ingredient():
     try:
-        # ✅ 權限檢查
         if request.user.get("role") != "developer":
             return jsonify({"error": "無權限新增食材"}), 403
 
-        # ✅ 資料驗證
-        data_list = request.get_json()
-        if not isinstance(data_list, list):
-            return jsonify({"error": "請傳入 JSON 陣列"}), 400
+        data = request.get_json()
+        print("接收到的新增食材資料:", data)
+
+        required_fields = ["name", "quantity", "unit", "price", "expiration_date"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"缺少必要欄位：{field}"}), 400
+
+        allowed_units = ["克", "毫升"]
+        if data["unit"] not in allowed_units:
+            return jsonify({"error": "無效的單位，請選擇 '克' 或 '毫升'"}), 400
 
         store_name = request.user.get("store_name")
-        allowed_units = ["克", "毫升"]
-        added_ids = []
+        ingredients_ref = db.collection("stores").document(store_name).collection("ingredients")
 
-        # ✅ 一筆一筆新增資料
-        for idx, data in enumerate(data_list):
-            required_fields = ["name", "quantity", "unit", "price", "expiration_date"]
-            for field in required_fields:
-                if field not in data:
-                    return jsonify({"error": f"第 {idx+1} 筆資料缺少欄位：{field}"}), 400
+        # 🔍 查詢是否已有相同名稱的食材
+        query = ingredients_ref.where("name", "==", data["name"]).limit(1).stream()
+        existing_doc = next(query, None)
 
-            if data["unit"] not in allowed_units:
-                return jsonify({"error": f"第 {idx+1} 筆資料單位錯誤，僅支援 '克' 或 '毫升'"}), 400
+        if existing_doc:
+            existing_data = existing_doc.to_dict()
+            doc_id = existing_doc.id
 
-            # ✅ 新增到 Firestore
-            doc_ref, _ = db.collection("stores").document(store_name).collection("ingredients").add({
-                "name": data.get("name"),
-                "quantity": data.get("quantity"),
-                "unit": data.get("unit"),
-                "price": data.get("price"),
-                "expiration_date": data.get("expiration_date")
+            new_quantity = existing_data.get("quantity", 0) + data["quantity"]
+            updated_price = existing_data.get("price", 0)
+            if updated_price == 0:
+                updated_price = data["price"]
+
+            ingredients_ref.document(doc_id).update({
+                "quantity": new_quantity,
+                "expiration_date": data["expiration_date"],
+                "price": updated_price
             })
-            added_ids.append(doc_ref.id)
-
-        # ✅ 撈出所有資料
-        ingredients = []
-        ingredients_ref = db.collection("stores").document(store_name).collection("ingredients").stream()
-        for doc in ingredients_ref:
-            try:
-                ing_dict = doc.to_dict()
-                exp = ing_dict.get("expiration_date")
-                # 安全轉換 expiration_date 為字串
-                if hasattr(exp, "isoformat"):
-                    expiration_str = exp.isoformat()
-                else:
-                    expiration_str = str(exp) if exp else "無效日期"
-
-                # 加入清單
-                ingredients.append({
-                    "id": doc.id,
-                    "name": ing_dict.get("name", ""),
-                    "quantity": ing_dict.get("quantity", 0),
-                    "unit": ing_dict.get("unit", ""),
-                    "price": ing_dict.get("price", 0),
-                    "expiration_date": expiration_str
-                })
-            except Exception as e:
-                print(f"⚠️ 無法解析食材 document：{str(e)}")
-                continue  # 避免中斷整體處理
-
-        return jsonify({
-            "message": f"成功新增 {len(added_ids)} 筆食材",
-            "added_ids": added_ids,
-            "ingredients": ingredients
-        }), 200
+            return jsonify({"message": "食材已合併更新", "doc_id": doc_id}), 200
+        else:
+            new_doc = ingredients_ref.add({
+                "name": data["name"],
+                "quantity": data["quantity"],
+                "unit": data["unit"],
+                "price": data["price"],
+                "expiration_date": data["expiration_date"]
+            })
+            return jsonify({"message": "食材新增成功", "doc_id": new_doc[1].id}), 200
 
     except Exception as e:
-        print("❌ 錯誤訊息:", str(e))
+        print("錯誤訊息:", str(e))
         return jsonify({"error": str(e)}), 500
 
 # ✅ 更新食材
@@ -125,18 +93,19 @@ def update_ingredient(ingredient_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 刪除食材
+# ✅ 刪除食材（需登入）
 @ingredients_bp.route('/delete_ingredient/<ingredient_id>', methods=['DELETE'])
 @token_required
 def delete_ingredient(ingredient_id):
     try:
         store_name = request.user.get("store_name")
         db.collection("stores").document(store_name).collection("ingredients").document(ingredient_id).delete()
+
         return jsonify({"message": "食材刪除成功"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 補貨
+# ✅ 補貨功能（需登入）
 @ingredients_bp.route('/restock_ingredients', methods=['POST'])
 @token_required
 def restock_ingredients():
@@ -165,6 +134,7 @@ def restock_ingredients():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ 自動依訂單扣除食材庫存（補入功能）
 @ingredients_bp.route('/refresh_inventory_by_sales', methods=['POST'])
 @token_required
 def refresh_inventory_by_sales():
@@ -176,19 +146,14 @@ def refresh_inventory_by_sales():
         sales_count = {}
         processed_ids = []
 
-        # 統計所有已完成未處理訂單的 menu_name 賣出數量
         for doc in orders:
             order = doc.to_dict()
             processed_ids.append(doc.id)
             for item in order.get("items", []):
                 name = item.get("menu_name")
                 qty = item.get("quantity", 0)
-                if name in sales_count:
-                    sales_count[name] += qty
-                else:
-                    sales_count[name] = qty
+                sales_count[name] = sales_count.get(name, 0) + qty
 
-        # 讀取 recipes 並換算成食材需求量
         UNIT_ALIAS = {"g": "克", "kg": "克", "ml": "毫升", "l": "毫升", "公克": "克", "公升": "毫升"}
         MULTIPLIER = {("kg", "克"): 1000, ("l", "毫升"): 1000}
 
@@ -229,12 +194,10 @@ def refresh_inventory_by_sales():
                     final_deduction = adjusted_amt * total_qty
                     ingredient_deduction[ing_id] = ingredient_deduction.get(ing_id, 0) + final_deduction
 
-        # 更新 ingredients 的數量
         for ing_id, deduction in ingredient_deduction.items():
             ing_ref = db.collection("stores").document(store_name).collection("ingredients").document(ing_id)
             ing_ref.update({"quantity": firestore.Increment(-deduction)})
 
-        # 將處理過的 completed_orders 記錄為 used
         for doc_id in processed_ids:
             completed_orders_ref.document(doc_id).update({"used_in_inventory_refresh": True})
 

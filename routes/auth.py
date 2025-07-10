@@ -21,7 +21,7 @@ def generate_token(payload):
     payload["exp"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=JWT_EXPIRE_MINUTES)
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-# ✅ 驗證 Token 的裝飾器
+# ✅ 驗證 Token 的裝飾器（更安全版本）
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -38,11 +38,23 @@ def token_required(f):
 
         try:
             decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            request.user = decoded
+            username = decoded.get("username")
+
+            if not username:
+                return jsonify({"error": "Token 無效：缺少 username"}), 401
+
+            # ✅ 從 Firestore 查出完整使用者資料
+            user_doc = db.collection(users_collection).document(username).get()
+            if not user_doc.exists:
+                return jsonify({"error": "找不到使用者"}), 404
+
+            request.user = user_doc.to_dict()  # ✅ 將 user 寫入 request.user
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token 已過期"}), 401
         except jwt.InvalidTokenError:
             return jsonify({"error": "無效的 Token"}), 401
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
         return f(*args, **kwargs)
     return decorated
@@ -57,7 +69,7 @@ def signup():
         store_name = data.get('storeName', '').strip()
         email = data.get('email', '').strip()
         phone = data.get('phone', '').strip()
-        address = data.get('address', '').strip()  # ✅ 新增地址欄位
+        address = data.get('address', '').strip()  # ✅ 地址欄位
         role = data.get('role') or 'staff'
 
         if not username: return jsonify({"error": "帳號不可為空"}), 400
@@ -65,9 +77,9 @@ def signup():
         if not store_name: return jsonify({"error": "店名不可為空"}), 400
         if not email: return jsonify({"error": "Email 不可為空"}), 400
         if not phone: return jsonify({"error": "手機號碼不可為空"}), 400
-        if not address: return jsonify({"error": "地址不可為空"}), 400  # ✅ 加入地址驗證
+        if not address: return jsonify({"error": "地址不可為空"}), 400
 
-        # 檢查帳號是否已經存在
+        # 檢查帳號是否已存在
         existing_user = db.collection(users_collection).document(username).get()
         if existing_user.exists:
             return jsonify({"error": "帳號已存在"}), 409
@@ -79,18 +91,16 @@ def signup():
             "store_name": store_name,
             "email": email,
             "phone": phone,
-            "address": address,  # ✅ 加入地址
+            "address": address,
             "role": role
         }
 
-        # 使用 username 作為 Document ID
         db.collection(users_collection).document(username).set(user_data)
 
         return jsonify({"message": "註冊成功"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 # ✅ 登入 API
 @auth_bp.route('/signin', methods=['POST'])
@@ -103,7 +113,6 @@ def signin():
         if not username: return jsonify({"error": "請輸入帳號"}), 400
         if not password: return jsonify({"error": "請輸入密碼"}), 400
 
-        # 使用 username 作為 Document ID 查詢
         user_doc = db.collection(users_collection).document(username).get()
         if not user_doc.exists:
             return jsonify({"error": "查無帳號，請重新輸入"}), 401
@@ -114,8 +123,8 @@ def signin():
 
         token = generate_token({
             "username": user["username"],
-            "role": user["role"],  # 保持 role 欄位
-            "store_name": user["store_name"]  # 新增 store_name 至 token
+            "role": user["role"],
+            "store_name": user["store_name"]
         })
 
         return jsonify({

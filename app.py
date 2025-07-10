@@ -10,7 +10,7 @@ from routes.orders import orders_bp
 from routes.menus import menus_bp
 from routes.auth import auth_bp
 from routes.recipes import recipes_bp
-
+from routes.inventory_checker import inventory_bp
 app = Flask(__name__)
 CORS(app)  # ✅ 允許跨域，讓前端能呼叫後端 API
 
@@ -21,7 +21,7 @@ app.register_blueprint(orders_bp)
 app.register_blueprint(menus_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(recipes_bp)
-
+app.register_blueprint(inventory_bp)
 # ✅ 公開 API：無需登入可下單
 @app.route('/public_place_order', methods=['POST'])
 def public_place_order():
