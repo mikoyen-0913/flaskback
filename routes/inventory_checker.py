@@ -5,6 +5,7 @@ from tool.lstm_predict_all import forecast_next_sales, load_models_and_data
 from tool.firebase_fetcher import fetch_ingredient_inventory, fetch_recipes
 from tool.ingredient_demand import calculate_total_demand
 import requests
+import traceback
 
 # 註冊 Blueprint
 inventory_bp = Blueprint('inventory', __name__)
@@ -120,4 +121,5 @@ def check_inventory():
         }), 200
 
     except Exception as e:
+        traceback.print_exc()  # ⬅️ 加這行才能看到詳細錯誤行數
         return jsonify({"error": str(e)}), 500

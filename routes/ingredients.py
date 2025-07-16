@@ -157,7 +157,9 @@ def refresh_inventory_by_sales():
         UNIT_ALIAS = {"g": "克", "kg": "克", "ml": "毫升", "l": "毫升", "公克": "克", "公升": "毫升"}
         MULTIPLIER = {("kg", "克"): 1000, ("l", "毫升"): 1000}
 
-        def normalize_unit(u): return UNIT_ALIAS.get(u.strip().lower(), u.strip())
+        def normalize_unit(u):
+            return UNIT_ALIAS.get(u.strip().lower(), u.strip())
+
         def convert_amount(ingredient_unit, recipe_unit, amount):
             key = (ingredient_unit, recipe_unit)
             if key in MULTIPLIER:
@@ -183,15 +185,26 @@ def refresh_inventory_by_sales():
                     ing_data = ing_doc.to_dict()
                     ing_unit = normalize_unit(ing_data.get("unit", ""))
 
+                    try:
+                        # 強制將數值轉換成 float
+                        recipe_amt = float(recipe_amt)
+                        total_qty = float(total_qty)
+                    except (ValueError, TypeError):
+                        return jsonify({"error": f"{ing_name} 的數值格式錯誤（recipe_amt: {recipe_amt}, qty: {total_qty}）"}), 400
+
                     if recipe_unit != ing_unit:
                         try:
                             adjusted_amt = convert_amount(ing_unit, recipe_unit, recipe_amt)
-                        except:
-                            return jsonify({"error": f"{ing_name} 單位不符且無法轉換"}), 400
+                        except Exception as e:
+                            return jsonify({"error": f"{ing_name} 單位不符且無法轉換：{str(e)}"}), 400
                     else:
                         adjusted_amt = recipe_amt
 
-                    final_deduction = adjusted_amt * total_qty
+                    try:
+                        final_deduction = float(adjusted_amt) * float(total_qty)
+                    except Exception as e:
+                        return jsonify({"error": f"無法計算扣除量（{ing_name}）：{str(e)}"}), 400
+
                     ingredient_deduction[ing_id] = ingredient_deduction.get(ing_id, 0) + final_deduction
 
         for ing_id, deduction in ingredient_deduction.items():
