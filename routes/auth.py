@@ -10,7 +10,7 @@ users_collection = "users"
 
 # ✅ JWT 秘密金鑰與過期時間
 JWT_SECRET = "your-secret-key"
-JWT_EXPIRE_MINUTES = 60
+JWT_EXPIRE_MINUTES = 720
 
 # ✅ 密碼雜湊
 def hash_password(password):
@@ -21,13 +21,12 @@ def generate_token(payload):
     payload["exp"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=JWT_EXPIRE_MINUTES)
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-# ✅ 驗證 Token 的裝飾器（更安全版本）
+# ✅ 驗證 Token 的裝飾器（支援 request.user）
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = None
 
-        # 從 header 抓取 token
         if 'Authorization' in request.headers:
             auth_header = request.headers['Authorization']
             if auth_header.startswith("Bearer "):
@@ -43,12 +42,11 @@ def token_required(f):
             if not username:
                 return jsonify({"error": "Token 無效：缺少 username"}), 401
 
-            # ✅ 從 Firestore 查出完整使用者資料
             user_doc = db.collection(users_collection).document(username).get()
             if not user_doc.exists:
                 return jsonify({"error": "找不到使用者"}), 404
 
-            request.user = user_doc.to_dict()  # ✅ 將 user 寫入 request.user
+            request.user = user_doc.to_dict()  # 附加到 request
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token 已過期"}), 401
         except jwt.InvalidTokenError:
@@ -69,31 +67,35 @@ def signup():
         store_name = data.get('storeName', '').strip()
         email = data.get('email', '').strip()
         phone = data.get('phone', '').strip()
-        address = data.get('address', '').strip()  # ✅ 地址欄位
+        address = data.get('address', '').strip()
         role = data.get('role') or 'staff'
+        store_ids = data.get('store_ids', [])  # 對 superadmin 開放 store_ids
 
         if not username: return jsonify({"error": "帳號不可為空"}), 400
         if not password: return jsonify({"error": "密碼不可為空"}), 400
-        if not store_name: return jsonify({"error": "店名不可為空"}), 400
+        if role != "superadmin" and not store_name:
+            return jsonify({"error": "店名不可為空"}), 400
         if not email: return jsonify({"error": "Email 不可為空"}), 400
         if not phone: return jsonify({"error": "手機號碼不可為空"}), 400
         if not address: return jsonify({"error": "地址不可為空"}), 400
 
-        # 檢查帳號是否已存在
         existing_user = db.collection(users_collection).document(username).get()
         if existing_user.exists:
             return jsonify({"error": "帳號已存在"}), 409
 
-        # 儲存資料
         user_data = {
             "username": username,
             "password_hash": hash_password(password),
-            "store_name": store_name,
             "email": email,
             "phone": phone,
             "address": address,
             "role": role
         }
+
+        if role == "superadmin":
+            user_data["store_ids"] = store_ids  # 多間店授權
+        else:
+            user_data["store_name"] = store_name  # 一間店
 
         db.collection(users_collection).document(username).set(user_data)
 
@@ -121,18 +123,24 @@ def signin():
         if user["password_hash"] != hash_password(password):
             return jsonify({"error": "密碼錯誤"}), 401
 
+        role = user["role"]
+        if role == "superadmin":
+            store_ids = user.get("store_ids", [])
+        else:
+            store_ids = [user.get("store_name")]
+
         token = generate_token({
             "username": user["username"],
-            "role": user["role"],
-            "store_name": user["store_name"]
+            "role": role,
+            "store_ids": store_ids
         })
 
         return jsonify({
             "message": "登入成功",
             "token": token,
             "username": user["username"],
-            "role": user["role"],
-            "store_name": user.get("store_name")
+            "role": role,
+            "store_ids": store_ids
         }), 200
 
     except Exception as e:

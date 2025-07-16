@@ -11,10 +11,12 @@ from routes.menus import menus_bp
 from routes.auth import auth_bp
 from routes.recipes import recipes_bp
 from routes.inventory_checker import inventory_bp
+from routes.superadmin import superadmin_bp
 app = Flask(__name__)
 CORS(app)  # ✅ 允許跨域，讓前端能呼叫後端 API
 
 # 註冊 Blueprint
+app.register_blueprint(superadmin_bp)
 app.register_blueprint(ingredients_bp)
 app.register_blueprint(flavors_bp)
 app.register_blueprint(orders_bp)
