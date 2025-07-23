@@ -140,7 +140,8 @@ def signin():
             "token": token,
             "username": user["username"],
             "role": role,
-            "store_ids": store_ids
+            "store_ids": store_ids,
+            "store_name": user.get("store_name", "")  # ✅ 補這裡
         }), 200
 
     except Exception as e:
