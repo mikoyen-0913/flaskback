@@ -7,14 +7,14 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 import joblib
 
-# === 參數與資料路徑 ===
+# === 儲存模型資料夾與參數設定 ===
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 SEQ_LEN = 7
 PRED_DAYS = 3
 
-# === 資料預處理 ===
+# === 讀取與前處理資料 ===
 df = pd.read_excel('adjusted_projectdata_v5_limited.xlsx')
 df['sales'] = df['adjusted_sales_v5']
 df['date'] = pd.to_datetime(df['date'])
@@ -25,7 +25,7 @@ pivot_df = df.pivot_table(index='date', columns='flavor', values=['sales', 'rain
 pivot_df = pivot_df.fillna(0)
 pivot_df.columns = ['{}_{}'.format(var, flavor) for var, flavor in pivot_df.columns]
 
-# === 時序切片 ===
+# === 建立序列資料 ===
 def create_sequences(data, seq_len=7, predict_days=3):
     X, y = [], []
     for i in range(len(data) - seq_len - predict_days + 1):
@@ -33,7 +33,7 @@ def create_sequences(data, seq_len=7, predict_days=3):
         y.append(data[i+seq_len:i+seq_len+predict_days, -1])
     return np.array(X), np.array(y)
 
-# === 模型架構 ===
+# === 模型架構（✅使用新版 input_shape 寫法）===
 def build_model(input_shape, pred_days):
     model = Sequential()
     model.add(LSTM(128, return_sequences=True, activation='relu', input_shape=input_shape))
@@ -44,7 +44,7 @@ def build_model(input_shape, pred_days):
     model.compile(optimizer='adam', loss='mse')
     return model
 
-# === 訓練與儲存 ===
+# === 開始為每個口味訓練模型並儲存 ===
 flavors = df['flavor'].unique()
 
 for flavor in flavors:
@@ -68,8 +68,8 @@ for flavor in flavors:
     model = build_model((SEQ_LEN, X.shape[2]), PRED_DAYS)
     model.fit(X, y, epochs=100, batch_size=8, validation_split=0.1, verbose=0)
 
-    # === 儲存模型與 scaler ===
-    model.save(f"{MODEL_DIR}/{flavor}_model.h5")
+    # ✅ 儲存新版模型與 scaler
+    model.save(f"{MODEL_DIR}/{flavor}.keras")
     joblib.dump(scaler, f"{MODEL_DIR}/{flavor}_scaler.pkl")
 
 print("✅ 所有模型與 scaler 已儲存完畢。")
