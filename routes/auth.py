@@ -57,7 +57,7 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ✅ 註冊 API
+# ✅ 註冊 API（加入自動建立分店機制）
 @auth_bp.route('/signup', methods=['POST'])
 def signup():
     try:
@@ -83,6 +83,7 @@ def signup():
         if existing_user.exists:
             return jsonify({"error": "帳號已存在"}), 409
 
+        # ✅ 建立 user 資料
         user_data = {
             "username": username,
             "password_hash": hash_password(password),
@@ -96,6 +97,13 @@ def signup():
             user_data["store_ids"] = store_ids  # 多間店授權
         else:
             user_data["store_name"] = store_name  # 一間店
+
+            # ✅ 自動建立分店文件（若尚未存在）
+            store_ref = db.collection('stores').document(store_name)
+            if not store_ref.get().exists:
+                store_ref.set({
+                    "created": True
+                })
 
         db.collection(users_collection).document(username).set(user_data)
 
@@ -144,5 +152,15 @@ def signin():
             "store_name": user.get("store_name", "")  # ✅ 補這裡
         }), 200
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+# ✅ 公開取得所有分店名稱（給顧客端）
+@auth_bp.route('/stores', methods=['GET'])
+def public_get_store_list():
+    try:
+        stores_ref = db.collection('stores').stream()
+        store_names = [doc.id for doc in stores_ref]
+        return jsonify({"store_names": sorted(store_names)}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
