@@ -21,22 +21,46 @@ pivot_df = df.pivot_table(index='date', columns='flavor', values=['sales', 'rain
 pivot_df = pivot_df.fillna(0)
 pivot_df.columns = ['{}_{}'.format(var, flavor) for var, flavor in pivot_df.columns]
 
+# ✅ Firebase 口味名稱清單
 flavors = df['flavor'].unique()
+
+# ✅ 檔名對照：Firebase名稱 → 模型資料夾名稱
+flavor_map = {
+    "珍珠鮮奶油": "珍珠奶油",
+    "黑芝麻鮮奶油": "黑芝麻奶油",
+    # 其他口味就直接用自己名字
+}
 
 # === 載入模型與 scaler ===
 def load_models_and_data():
     models = {}
     scalers = {}
+    missing_flavors = []
+
     for flavor in flavors:
-        model_path = f"{MODEL_DIR}/{flavor}_model.h5"
-        scaler_path = f"{MODEL_DIR}/{flavor}_scaler.pkl"
+        mapped_name = flavor_map.get(flavor, flavor)
+        model_path = f"{MODEL_DIR}/{mapped_name}_model.h5"
+        scaler_path = f"{MODEL_DIR}/{mapped_name}_scaler.pkl"
+
         if os.path.exists(model_path) and os.path.exists(scaler_path):
-            models[flavor] = load_model(model_path, compile=False)
-            scalers[flavor] = joblib.load(scaler_path)
+            try:
+                models[flavor] = load_model(model_path, compile=False)
+                scalers[flavor] = joblib.load(scaler_path)
+                print(f"✅ 成功載入模型與 scaler：{flavor}（實際檔名：{mapped_name}）")
+            except Exception as e:
+                print(f"❌ 載入失敗：{flavor} → {str(e)}")
+        else:
+            print(f"⚠️ 缺少模型或 scaler 檔案：{mapped_name}")
+            missing_flavors.append(flavor)
+
+    print(f"📦 總共載入模型數：{len(models)} / {len(flavors)}")
+    if missing_flavors:
+        print("🔍 以下口味未能成功載入：", missing_flavors)
+
     return models, scalers, pivot_df, flavors
 
 # === 預測函式 ===
-def forecast_next_sales(flavor, pivot_df, model, scaler, future_weather, seq_len=7, pred_days=3):
+def forecast_next_sales(flavor, pivot_df, model, scaler, future_weather, seq_len=SEQ_LEN, pred_days=PRED_DAYS):
     features = [f'rainfall_{flavor}', f'temperature_{flavor}', f'weekday_{flavor}']
     target = f'sales_{flavor}'
     data = pivot_df[[*features, target]].copy()

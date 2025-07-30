@@ -7,18 +7,17 @@ from tool.ingredient_demand import calculate_total_demand
 import requests
 import traceback
 
-# 註冊 Blueprint
 inventory_bp = Blueprint('inventory', __name__)
 
-# === 工具：將地址轉換為 GPS 座標（使用 OpenStreetMap Nominatim）===
+# === 地址轉換為 GPS（使用 OpenStreetMap Nominatim）===
 def geocode_address(address):
     url = "https://nominatim.openstreetmap.org/search"
     params = {
         "q": address,
         "format": "json",
         "limit": 1,
-        "countrycodes": "tw",          # ✅ 限定查詢範圍在台灣
-        "accept-language": "zh-TW"     # ✅ 回傳繁體中文地名
+        "countrycodes": "tw",
+        "accept-language": "zh-TW"
     }
 
     try:
@@ -40,8 +39,7 @@ def geocode_address(address):
         print(f"❌ 地址轉換失敗：{e}，使用預設位置（台中中區）")
         return 24.15, 120.65
 
-
-# === API 路由：自動根據使用者帳號計算店鋪缺料狀況 ===
+# === API：計算缺料狀況 ===
 @inventory_bp.route('/check_inventory', methods=['POST'])
 @token_required
 def check_inventory():
@@ -67,6 +65,8 @@ def check_inventory():
 
         # 3️⃣ 載入模型與口味名稱
         models, scalers, pivot_df, flavors = load_models_and_data()
+        print("✔️ 載入模型口味：", list(models.keys()))
+        print("📊 pivot_df columns：", pivot_df.columns)
 
         # 4️⃣ 預測銷量
         predicted_sales = {}
@@ -76,10 +76,17 @@ def check_inventory():
             if model and scaler:
                 y_pred = forecast_next_sales(flavor, pivot_df, model, scaler, forecast_data)
                 predicted_sales[flavor] = sum(y_pred)
+                print(f"📈 預測 {flavor} 的銷量為：{y_pred}，總和：{sum(y_pred)}")
+            else:
+                print(f"⚠️ 無法取得模型或 scaler：{flavor}")
+
+        print("📦 預測總銷量：", predicted_sales)
 
         # 5️⃣ 根據使用者店名抓食材庫存與配方需求
         inventory = fetch_ingredient_inventory(store_name)
         recipes = fetch_recipes()
+        print("📋 珍珠鮮奶油食譜：", recipes.get("珍珠鮮奶油"))
+
         demand = calculate_total_demand(predicted_sales, recipes)
 
         # 6️⃣ 缺料報告
@@ -97,20 +104,33 @@ def check_inventory():
                 shortage_report[ingredient_name] = {
                     "status": "單位不一致",
                     "required": required,
-                    "available": available
+                    "available": available,
+                    "unit": unit
                 }
             elif required > available:
                 shortage_report[ingredient_name] = {
                     "status": "缺料",
                     "required": required,
                     "available": available,
-                    "shortage": required - available
+                    "shortage": required - available,
+                    "unit": unit
                 }
             else:
                 shortage_report[ingredient_name] = {
                     "status": "足夠",
                     "required": required,
-                    "available": available
+                    "available": available,
+                    "unit": unit
+                }
+
+        # 🔎 額外顯示未使用的庫存項目
+        for ingredient_name in inventory:
+            if ingredient_name not in shortage_report:
+                shortage_report[ingredient_name] = {
+                    "status": "未使用",
+                    "required": 0,
+                    "available": inventory[ingredient_name]["quantity"],
+                    "unit": inventory[ingredient_name]["unit"]
                 }
 
         # 7️⃣ 結果回傳
@@ -121,5 +141,5 @@ def check_inventory():
         }), 200
 
     except Exception as e:
-        traceback.print_exc()  # ⬅️ 加這行才能看到詳細錯誤行數
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500

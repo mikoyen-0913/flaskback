@@ -1,3 +1,12 @@
+# ingredient_demand.py
+
+# === 口味名稱對應表（預測名稱 → 食譜名稱）===
+flavor_map = {
+    "珍珠奶油": "珍珠鮮奶油",
+    "黑芝麻奶油": "黑芝麻鮮奶油",
+    # 如有其他對應請在此補上
+}
+
 def calculate_total_demand(predicted_sales: dict, recipe_table: dict):
     """
     根據銷售預測數量與食譜表計算總食材需求量
@@ -9,10 +18,13 @@ def calculate_total_demand(predicted_sales: dict, recipe_table: dict):
     demand = {}
 
     for flavor, count in predicted_sales.items():
-        if flavor not in recipe_table:
-            continue  # 若該口味沒有食譜則跳過
+        mapped_flavor = flavor_map.get(flavor, flavor)  # ✅ 做名稱對應
 
-        for ingredient, (amount_per_item, unit) in recipe_table[flavor].items():
+        if mapped_flavor not in recipe_table:
+            print(f"⚠️ 找不到 {mapped_flavor} 的食譜，跳過")
+            continue
+
+        for ingredient, (amount_per_item, unit) in recipe_table[mapped_flavor].items():
             ingredient_name = ingredient.upper()  # 強制轉大寫統一名稱
 
             if not isinstance(amount_per_item, (int, float)) or not isinstance(count, (int, float)):
@@ -22,7 +34,7 @@ def calculate_total_demand(predicted_sales: dict, recipe_table: dict):
 
             if ingredient_name not in demand:
                 demand[ingredient_name] = {"total": 0, "unit": unit}
-            
+
             demand[ingredient_name]["total"] += total_amount
 
     return demand
