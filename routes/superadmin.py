@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
+# ✅ 各分店營收折線圖 API（range: 7days / month / year）
 @superadmin_bp.route("/get_all_store_revenue", methods=["GET"])
 @token_required
 def get_all_store_revenue():
@@ -109,7 +110,7 @@ def get_all_store_revenue():
 
     return jsonify(result)
 
-# ✅ 新增 API：取得各分店每種口味的總銷量（圓餅圖用）
+# ✅ 圓餅圖口味統計 API
 @superadmin_bp.route("/get_store_flavor_sales", methods=["GET"])
 @token_required
 def get_store_flavor_sales():
@@ -127,10 +128,7 @@ def get_store_flavor_sales():
     try:
         year, month = map(int, month_str.split("-"))
         start_date = datetime(year, month, 1)
-        if month == 12:
-            end_date = datetime(year + 1, 1, 1)
-        else:
-            end_date = datetime(year, month + 1, 1)
+        end_date = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
     except:
         return jsonify({"error": "月份格式錯誤"}), 400
 
@@ -155,3 +153,34 @@ def get_store_flavor_sales():
         result[store_name] = flavor_list
 
     return jsonify(result)
+
+# ✅ 查詢登入者可管理的所有分店
+@superadmin_bp.route("/get_my_stores", methods=["GET"])
+@token_required
+def get_my_stores():
+    user = request.user
+    if user.get("role") != "superadmin":
+        return jsonify({"error": "僅限企業主使用"}), 403
+
+    store_ids = user.get("store_ids", [])
+    return jsonify({"stores": store_ids}), 200
+
+# ✅ 查詢指定分店的庫存清單（superadmin 專用）
+@superadmin_bp.route("/get_inventory_by_store", methods=["GET"])
+@token_required
+def get_inventory_by_store():
+    user = request.user
+    if user.get("role") != "superadmin":
+        return jsonify({"error": "僅限企業主使用"}), 403
+
+    store_name = request.args.get("store")
+    if not store_name:
+        return jsonify({"error": "請提供 store 參數"}), 400
+
+    try:
+        ingredients_ref = db.collection("stores").document(store_name).collection("ingredients")
+        snapshot = ingredients_ref.stream()
+        inventory = [{"id": doc.id, **doc.to_dict()} for doc in snapshot]
+        return jsonify({"store": store_name, "inventory": inventory}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
