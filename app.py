@@ -12,10 +12,21 @@ from routes.auth import auth_bp
 from routes.recipes import recipes_bp
 from routes.inventory_checker import inventory_bp
 from routes.superadmin import superadmin_bp
-app = Flask(__name__)
-CORS(app)  # ✅ 允許跨域，讓前端能呼叫後端 API
 
-# 註冊 Blueprint
+app = Flask(__name__)
+
+# ✅ 最終正確寫法：允許 Firebase 與本地端都可連線
+CORS(app, supports_credentials=True, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:3000",
+            "https://yaoyaoproject-88907.web.app"
+        ]
+    }
+})
+
+
+# === 註冊 Blueprint ===
 app.register_blueprint(superadmin_bp)
 app.register_blueprint(ingredients_bp)
 app.register_blueprint(flavors_bp)
@@ -24,7 +35,23 @@ app.register_blueprint(menus_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(recipes_bp)
 app.register_blueprint(inventory_bp)
-# ✅ 公開 API：無需登入可下單
+
+# ✅ ngrok 防濫用畫面避免
+@app.after_request
+def add_ngrok_header(response):
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    return response
+
+# ✅ favicon.ico 避免錯誤
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
+
+@app.route("/")
+def home():
+    return jsonify({"message": "Backend is running!"})
+
+# ✅ 公開 API：無需登入即可下單
 @app.route('/public_place_order', methods=['POST'])
 def public_place_order():
     try:
@@ -44,7 +71,7 @@ def public_place_order():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# ✅ 公開 API：無需登入即可取得菜單
 @app.route('/public_menus', methods=['GET'])
 def public_menus():
     try:
@@ -57,7 +84,7 @@ def public_menus():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# ✅ 主程式
 if __name__ == '__main__':
     with app.test_request_context():
         print("✅ Registered Routes:")
