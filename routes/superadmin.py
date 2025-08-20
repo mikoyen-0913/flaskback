@@ -321,7 +321,7 @@ def get_store_revenue_rank():
     store_sales.sort(key=lambda x: x["total_sales"], reverse=True)
     return jsonify(store_sales)
 
-# ✅ superadmin 取得所有分店的地址與經緯度
+# ✅ superadmin 取得所有分店的地址、經緯度與（指定期間）營收總額
 @superadmin_bp.route("/get_store_locations", methods=["GET"])
 @token_required
 def get_store_locations():
@@ -329,20 +329,61 @@ def get_store_locations():
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
 
-    # ✅ 查詢 role 是 developer 或 staff 的使用者
+    # --- 期間參數解析：預設「month」 ---
+    range_type = request.args.get("range", "month")
+    now = datetime.now()
+
+    if range_type == "7days":
+        start_ts = datetime(now.year, now.month, now.day) - timedelta(days=6)
+        end_ts = datetime(now.year, now.month, now.day) + timedelta(days=1)
+    elif range_type == "month":
+        month_str = request.args.get("month")
+        if month_str:
+            try:
+                y, m = map(int, month_str.split("-"))
+            except Exception:
+                return jsonify({"error": "月份格式錯誤，需為 YYYY-MM"}), 400
+        else:
+            y, m = now.year, now.month
+        start_ts = datetime(y, m, 1)
+        end_ts = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
+    elif range_type == "year":
+        y = int(request.args.get("year", now.year))
+        start_ts = datetime(y, 1, 1)
+        end_ts = datetime(y + 1, 1, 1)
+    else:
+        return jsonify({"error": "range 參數錯誤，允許值：7days / month / year"}), 400
+
+    # --- 掃描 users：挑出分店帳號（developer/staff） ---
     users_ref = db.collection("users")
     docs = users_ref.stream()
 
     store_list = []
     for doc in docs:
-        data = doc.to_dict()
+        data = doc.to_dict() or {}
         role = data.get("role", "")
         if role not in ["developer", "staff"]:
-            continue  # ❌ 跳過非分店帳號
+            continue
 
         store_name = data.get("store_name", "")
         address = data.get("address", "")
-        revenue = data.get("revenue", 0)
+
+        # --- 動態計算營收 ---
+        revenue = 0
+        if store_name:
+            try:
+                orders_ref = (
+                    db.collection("stores")
+                      .document(store_name)
+                      .collection("completed_orders")
+                      .where("completed_at", ">=", start_ts)
+                      .where("completed_at", "<", end_ts)
+                )
+                orders = orders_ref.stream()
+                revenue = sum(o.to_dict().get("total_price", 0) for o in orders)
+            except Exception as e:
+                print(f"[get_store_locations] 營收查詢失敗 {store_name}: {e}")
+
         lat, lon = geocode_address(address)
 
         store_list.append({
@@ -353,4 +394,4 @@ def get_store_locations():
             "revenue": revenue
         })
 
-    return jsonify(store_list)
+    return jsonify(store_list), 200
