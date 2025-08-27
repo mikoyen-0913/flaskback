@@ -15,15 +15,14 @@ from routes.superadmin import superadmin_bp
 
 app = Flask(__name__)
 
-# ✅ 最終正確寫法：允許 Firebase 與本地端都可連線
+# CORS 設定（允許本地端與 Firebase，支援 PUT/DELETE）
 CORS(app, supports_credentials=True, origins=[
     "http://localhost:3000",
     "https://yaoyaoproject-88907.web.app"
-], allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
+], allow_headers=["Content-Type", "Authorization"],
+   methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
-
-
-# === 註冊 Blueprint ===
+# 註冊 Blueprint
 app.register_blueprint(superadmin_bp)
 app.register_blueprint(ingredients_bp)
 app.register_blueprint(flavors_bp)
@@ -33,13 +32,13 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(recipes_bp)
 app.register_blueprint(inventory_bp)
 
-# ✅ ngrok 防濫用畫面避免
+# ngrok 防濫用提示避免
 @app.after_request
 def add_ngrok_header(response):
     response.headers["ngrok-skip-browser-warning"] = "true"
     return response
 
-# ✅ favicon.ico 避免錯誤
+# favicon.ico 避免錯誤
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
@@ -48,7 +47,7 @@ def favicon():
 def home():
     return jsonify({"message": "Backend is running!"})
 
-# ✅ 公開 API：無需登入即可下單
+# 公開 API：無需登入即可下單
 @app.route('/public_place_order', methods=['POST'])
 def public_place_order():
     try:
@@ -68,20 +67,20 @@ def public_place_order():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 公開 API：無需登入即可取得菜單
+# 公開 API：無需登入即可取得菜單
 @app.route('/public_menus', methods=['GET'])
 def public_menus():
     try:
         menus = []
         for doc in db.collection("menus").stream():
             item = doc.to_dict()
-            item["menu_id"] = doc.id  # 傳回 menu_id 給前端
+            item["menu_id"] = doc.id
             menus.append(item)
         return jsonify({"menus": menus})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 主程式
+# 主程式
 if __name__ == '__main__':
     with app.test_request_context():
         print("✅ Registered Routes:")
