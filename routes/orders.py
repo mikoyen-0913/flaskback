@@ -7,6 +7,17 @@ from google.cloud.firestore import Increment
 
 orders_bp = Blueprint('orders', __name__)
 
+# === 小工具：取得台灣時區的今天字串 YYYYMMDD ===
+def taipei_today_str_from_utc(dt_utc: datetime.datetime | None = None) -> str:
+    if dt_utc is None:
+        dt_utc = datetime.datetime.utcnow()
+    # 台灣時區 +08:00（避免 UTC 跨日造成歸檔錯誤）
+    return (dt_utc + datetime.timedelta(hours=8)).strftime("%Y%m%d")
+
+
+# =========================
+# 下單（需要登入）
+# =========================
 @orders_bp.route('/place_order', methods=['POST'])
 @token_required
 def place_order():
@@ -56,7 +67,7 @@ def place_order():
                 "unit_price": unit_price,
                 "quantity": quantity,
                 "subtotal": subtotal
-                })
+            })
             total_price += subtotal
 
         now = datetime.datetime.utcnow()
@@ -82,7 +93,8 @@ def place_order():
             "total_price": total_price,
             "created_at": now,
             "timestamp": now,
-            "status": "pending"
+            "status": "pending",
+            "store_name": store_name,  # 供後續 collectionGroup 查詢
         }
 
         # ✅ 寫入 store 對應的 orders 子集合
@@ -100,13 +112,19 @@ def place_order():
         print("❌ 錯誤：", str(e))
         return jsonify({"error": str(e)}), 500
 
-# ✅ 查詢所有訂單
+
+# =========================
+# 查詢 pending 訂單
+# =========================
 @orders_bp.route('/get_orders', methods=['GET'])
 @token_required
 def get_orders():
     try:
         store_name = request.user.get("store_name")
-        orders_ref = db.collection("stores").document(store_name).collection("orders").order_by("created_at").stream()
+        orders_ref = (db.collection("stores").document(store_name)
+                        .collection("orders")
+                        .order_by("created_at")
+                        .stream())
         orders = []
         for doc in orders_ref:
             data = doc.to_dict()
@@ -120,7 +138,9 @@ def get_orders():
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ 刪除訂單
+# =========================
+# 刪除 pending 訂單
+# =========================
 @orders_bp.route('/delete_order/<order_id>', methods=['DELETE'])
 @token_required
 def delete_order(order_id):
@@ -132,7 +152,9 @@ def delete_order(order_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ 更新訂單
+# =========================
+# 更新 pending 訂單
+# =========================
 @orders_bp.route('/update_order/<order_id>', methods=['PUT'])
 @token_required
 def update_order(order_id):
@@ -181,7 +203,9 @@ def update_order(order_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ 完成訂單並扣庫存
+# =========================
+# 完成單筆訂單並扣庫存
+# =========================
 @orders_bp.route("/complete_order/<order_id>", methods=["POST"])
 @token_required
 def complete_order(order_id):
@@ -220,7 +244,8 @@ def complete_order(order_id):
             menu_name = item.get("menu_name")
             quantity = item.get("quantity", 1)
 
-            recipe_doc = db.collection("stores").document(store_name).collection("recipes").document(menu_name).get()
+            recipe_doc = (db.collection("stores").document(store_name)
+                            .collection("recipes").document(menu_name).get())
             if not recipe_doc.exists:
                 continue
             recipe = recipe_doc.to_dict()
@@ -229,7 +254,9 @@ def complete_order(order_id):
                 amount = detail.get("amount")
                 recipe_unit = normalize_unit(detail.get("unit"))
 
-                ing_query = db.collection("stores").document(store_name).collection("ingredients").where("name", "==", ing_name).limit(1).stream()
+                ing_query = (db.collection("stores").document(store_name)
+                               .collection("ingredients")
+                               .where("name", "==", ing_name).limit(1).stream())
                 for ing_doc in ing_query:
                     ing_data = ing_doc.to_dict()
                     ingredient_unit = normalize_unit(ing_data.get("unit"))
@@ -245,18 +272,36 @@ def complete_order(order_id):
                     db.collection("stores").document(store_name).collection("ingredients").document(ing_doc.id).update({
                         "quantity": Increment(-adjusted_amount * quantity)
                     })
+
+        # === 完成資訊 & 新結構寫入 ===
+        now_utc = datetime.datetime.utcnow()
+        ymd = taipei_today_str_from_utc(now_utc)
+        order_number = order_data.get("order_number", 0)
+        doc_id = f"{ymd}-{order_number}"
+
         order_data["status"] = "completed"
-        order_data["used_in_inventory_refresh"] = False 
+        order_data["used_in_inventory_refresh"] = False
         order_data["completed_at"] = firestore.SERVER_TIMESTAMP
         order_data["timestamp"] = firestore.SERVER_TIMESTAMP
-        db.collection("stores").document(store_name).collection("completed_orders").document(order_id).set(order_data)
+        order_data["store_name"] = store_name  # 供 collectionGroup 篩選
+
+        dates_ref = (db.collection("stores").document(store_name)
+                        .collection("dates").document(ymd)
+                        .collection("completed_orders").document(doc_id))
+        dates_ref.set(order_data)
+
+        # 刪掉 pending
         order_ref.delete()
 
         return jsonify({"message": "訂單已完成並已扣庫存"}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
+
+# =========================
+# 批次完成多筆並扣庫存
+# =========================
 @orders_bp.route("/complete_multiple_orders", methods=["POST"])
 @token_required
 def complete_multiple_orders():
@@ -301,7 +346,8 @@ def complete_multiple_orders():
                 menu_name = item.get("menu_name")
                 quantity = item.get("quantity", 1)
 
-                recipe_doc = db.collection("stores").document(store_name).collection("recipes").document(menu_name).get()
+                recipe_doc = (db.collection("stores").document(store_name)
+                                .collection("recipes").document(menu_name).get())
                 if not recipe_doc.exists:
                     continue
                 recipe = recipe_doc.to_dict()
@@ -310,7 +356,9 @@ def complete_multiple_orders():
                     amount = detail.get("amount")
                     recipe_unit = normalize_unit(detail.get("unit"))
 
-                    ing_query = db.collection("stores").document(store_name).collection("ingredients").where("name", "==", ing_name).limit(1).stream()
+                    ing_query = (db.collection("stores").document(store_name)
+                                   .collection("ingredients")
+                                   .where("name", "==", ing_name).limit(1).stream())
                     for ing_doc in ing_query:
                         ing_data = ing_doc.to_dict()
                         ingredient_unit = normalize_unit(ing_data.get("unit"))
@@ -327,14 +375,24 @@ def complete_multiple_orders():
                             "quantity": Increment(-adjusted_amount * quantity)
                         })
 
-            # ✅ 加上完成資訊與狀態
+            # === 完成資訊 & 新結構寫入 ===
+            now_utc = datetime.datetime.utcnow()
+            ymd = taipei_today_str_from_utc(now_utc)
+            order_number = order_data.get("order_number", 0)
+            doc_id = f"{ymd}-{order_number}"
+
             order_data["status"] = "completed"
             order_data["used_in_inventory_refresh"] = False
             order_data["completed_at"] = firestore.SERVER_TIMESTAMP
             order_data["timestamp"] = firestore.SERVER_TIMESTAMP
+            order_data["store_name"] = store_name  # 供 collectionGroup 篩選
 
-            # ✅ 搬移至 completed_orders
-            db.collection("stores").document(store_name).collection("completed_orders").document(order_id).set(order_data)
+            dates_ref = (db.collection("stores").document(store_name)
+                            .collection("dates").document(ymd)
+                            .collection("completed_orders").document(doc_id))
+            dates_ref.set(order_data)
+
+            # 刪掉 pending
             order_ref.delete()
 
         return jsonify({"message": "多筆訂單完成成功"}), 200
@@ -343,24 +401,38 @@ def complete_multiple_orders():
         return jsonify({"error": str(e)}), 500
 
 
-
-# ✅ 查詢已完成訂單
+# =========================
+# 查詢已完成訂單（新版：依日期）
+# /get_completed_orders?date=YYYYMMDD
+# 若未提供 date，預設為今天（台灣時間）
+# =========================
 @orders_bp.route('/get_completed_orders', methods=['GET'])
 @token_required
 def get_completed_orders():
     try:
         store_name = request.user.get("store_name")
-        docs = db.collection("stores").document(store_name).collection("completed_orders").order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+        date_str = request.args.get("date")
+        if not date_str:
+            date_str = taipei_today_str_from_utc()
+
+        docs = (db.collection("stores").document(store_name)
+                    .collection("dates").document(date_str)
+                    .collection("completed_orders")
+                    .order_by("timestamp", direction=firestore.Query.DESCENDING)
+                    .stream())
         orders = []
         for doc in docs:
             order = doc.to_dict()
-            order['id'] = doc.id
+            order['id'] = doc.id  # 例如 20250827-46
             orders.append(order)
-        return jsonify({"orders": orders}), 200
+        return jsonify({"date": date_str, "orders": orders}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 公開版訂單下單（不需登入）
+
+# =========================
+# 公開版下單（不需登入）
+# =========================
 @orders_bp.route('/public_place_order', methods=['POST'])
 def public_place_order():
     try:
@@ -392,7 +464,7 @@ def public_place_order():
         # ✅ 執行 Transaction
         order_number = increment_order_number(transaction)
 
-        # 🔄 建立訂單內容（略）
+        # 🔄 建立訂單內容
         order_items = []
         total_price = 0
         for item in items:
@@ -424,7 +496,8 @@ def public_place_order():
             "total_price": total_price,
             "created_at": now,
             "timestamp": now,
-            "status": "pending"
+            "status": "pending",
+            "store_name": store_name,
         }
 
         doc_ref = db.collection("stores").document(store_name).collection("orders").add(order_data)
@@ -440,6 +513,12 @@ def public_place_order():
         print("❌ 錯誤：", str(e))
         return jsonify({"error": str(e)}), 500
 
+
+# =========================
+# 營收統計（相容新結構）
+# 透過 collection group 查全部 completed_orders，
+# 以 store_name + timestamp 篩選最近 N 天
+# =========================
 @orders_bp.route("/get_sales_summary", methods=["GET"])
 @token_required
 def get_sales_summary():
@@ -449,10 +528,13 @@ def get_sales_summary():
         now = datetime.datetime.utcnow()
         start_date = now - datetime.timedelta(days=days)
 
-        completed_ref = db.collection("stores").document(store_name).collection("completed_orders")
-        docs = completed_ref.where("timestamp", ">=", start_date).stream()
+        # 使用 collectionGroup 搜尋所有 dates/*/completed_orders
+        docs = (db.collection_group("completed_orders")
+                  .where("store_name", "==", store_name)
+                  .where("timestamp", ">=", start_date)
+                  .stream())
 
-        sales_by_date = {}
+        sales_by_date: dict[str, float] = {}
 
         for doc in docs:
             data = doc.to_dict()
