@@ -16,11 +16,16 @@ from routes.superadmin import superadmin_bp
 app = Flask(__name__)
 
 # ✅ 最終正確寫法：允許 Firebase 與本地端都可連線
-CORS(app, supports_credentials=True, origins=[
-    "http://localhost:3000",
-    "https://yaoyaoproject-88907.web.app"
-], allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
-
+CORS(app, resources={r"/*": {
+    "origins": [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://yaoyaoproject-88907.web.app"
+    ],
+    "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"],
+    "supports_credentials": True
+}})
 
 
 # === 註冊 Blueprint ===
