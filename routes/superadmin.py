@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, date
 import calendar
 import requests
 from collections import defaultdict
+from google.cloud import firestore
+
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
@@ -417,3 +419,99 @@ def get_store_locations():
         })
 
     return jsonify(store_list), 200
+
+
+# ============ 調貨（大老闆一鍵調貨＋記錄） ============
+
+@superadmin_bp.route("/superadmin/transfer", methods=["OPTIONS"])
+def superadmin_transfer_preflight():
+    return ("", 204)
+
+@firestore.transactional
+def _do_transfer(tx, *, from_ref, to_ref, transfer_ref, data, user, qty):
+    from_snap = tx.get(from_ref)
+    to_snap = tx.get(to_ref)
+
+    if not from_snap.exists:
+        raise ValueError("來源分店沒有此食材")
+
+    from_qty = float((from_snap.to_dict() or {}).get("quantity", 0.0))
+    if from_qty < qty:
+        raise ValueError("來源庫存不足")
+
+    # 扣來源
+    tx.update(from_ref, {
+        "quantity": from_qty - qty,
+        "updated_at": firestore.SERVER_TIMESTAMP
+    })
+
+    # 加到目標
+    if to_snap.exists:
+        cur = float((to_snap.to_dict() or {}).get("quantity", 0.0))
+        tx.update(to_ref, {
+            "quantity": cur + qty,
+            "updated_at": firestore.SERVER_TIMESTAMP
+        })
+    else:
+        tx.set(to_ref, {
+            "name": data["ingredient_name"],
+            "unit": data["unit"],
+            "quantity": qty,
+            "updated_at": firestore.SERVER_TIMESTAMP
+        })
+
+    # 寫入調貨紀錄
+    tx.set(transfer_ref, {
+        "from_store": data["from_store"],
+        "to_store": data["to_store"],
+        "ingredient_id": data["ingredient_id"],
+        "ingredient_name": data["ingredient_name"],
+        "unit": data["unit"],
+        "quantity": qty,
+        "note": data.get("note", ""),
+        "executed_by": user.get("uid"),
+        "executed_at": firestore.SERVER_TIMESTAMP,
+        "status": "completed"
+    })
+
+
+@superadmin_bp.route("/superadmin/transfer", methods=["POST"])
+@token_required
+def superadmin_transfer():
+    user = request.user
+    if user.get("role") != "superadmin":
+        return jsonify({"error": "你不是企業主"}), 403
+
+    data = request.get_json() or {}
+    required = ["from_store", "to_store", "ingredient_id", "ingredient_name", "unit", "quantity"]
+    if any(k not in data for k in required):
+        return jsonify({"error": "缺少必要欄位"}), 400
+
+    if data["from_store"] == data["to_store"]:
+        return jsonify({"error": "來源與目標分店不能相同"}), 400
+
+    try:
+        qty = float(data["quantity"])
+    except Exception:
+        return jsonify({"error": "quantity 必須為數字"}), 400
+    if qty <= 0:
+        return jsonify({"error": "quantity 必須為正數"}), 400
+
+    from_ref = db.collection("stores").document(data["from_store"]).collection("ingredients").document(data["ingredient_id"])
+    to_ref = db.collection("stores").document(data["to_store"]).collection("ingredients").document(data["ingredient_id"])
+    transfer_ref = db.collection("transfers").document()
+
+    try:
+        # ✅ 直接呼叫，transactional 會自動建立 transaction
+        _do_transfer(from_ref=from_ref,
+                     to_ref=to_ref,
+                     transfer_ref=transfer_ref,
+                     data=data,
+                     user=user,
+                     qty=qty)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"調貨失敗：{e}"}), 500
+
+    return jsonify({"ok": True, "transfer_id": transfer_ref.id}), 200
