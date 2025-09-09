@@ -7,17 +7,30 @@ import calendar
 import requests
 from collections import defaultdict
 from google.cloud import firestore
-
+import json
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
-
 # ------------- 共用工具函式 -------------
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+def _get_ing_doc_ref(store: str, ingredient_id: str | None, ingredient_name: str | None):
+    col = db.collection("stores").document(store).collection("ingredients")
+    if ingredient_id:
+        return col.document(ingredient_id)
+    if ingredient_name:
+        # 名稱對應（大小寫不敏感，建議你日後在食材文件儲存 name_lower 以利索引）
+        q = col.where("name", "==", ingredient_name).limit(1).stream()
+        doc = next(q, None)
+        if doc:
+            return col.document(doc.id)
+    return None
 
 def _ymd(dt: date) -> str:
     """date -> 'YYYYMMDD'"""
     return f"{dt.year}{dt.month:02d}{dt.day:02d}"
-
 
 def _iter_days(start_dt: date, end_dt_exclusive: date):
     """yield date from start_dt (inclusive) to end_dt_exclusive (exclusive)"""
@@ -25,7 +38,6 @@ def _iter_days(start_dt: date, end_dt_exclusive: date):
     while cur < end_dt_exclusive:
         yield cur
         cur += timedelta(days=1)
-
 
 def _month_range(year: int, month: int):
     """return (start_date, end_date_exclusive) of the month"""
@@ -35,7 +47,6 @@ def _month_range(year: int, month: int):
     else:
         end_dt = date(year, month + 1, 1)
     return start_dt, end_dt
-
 
 def _get_daily_summary(store_name: str, dt: date):
     """讀取單日 summary（可能不存在）"""
@@ -47,7 +58,6 @@ def _get_daily_summary(store_name: str, dt: date):
     snap = doc_ref.get()
     return snap.to_dict() if snap.exists else None
 
-
 def _sum_store_revenue_between(store_name: str, start_dt: date, end_dt_exclusive: date) -> int:
     """用 daily_summary 累加指定區間的 revenue"""
     total = 0
@@ -57,7 +67,6 @@ def _sum_store_revenue_between(store_name: str, start_dt: date, end_dt_exclusive
             total += int(data.get("revenue", 0))
     return total
 
-
 def _sum_store_orders_between(store_name: str, start_dt: date, end_dt_exclusive: date) -> int:
     """用 daily_summary 累加指定區間的 orders_count"""
     total = 0
@@ -66,7 +75,6 @@ def _sum_store_orders_between(store_name: str, start_dt: date, end_dt_exclusive:
         if data:
             total += int(data.get("orders_count", 0))
     return total
-
 
 def _sum_store_flavor_counts_in_month(store_name: str, year: int, month: int):
     """回傳 (counts_map, labels_map)，用當月每天的 flavor_counts 相加，labels 以最後一次出現為準"""
@@ -89,13 +97,11 @@ def _sum_store_flavor_counts_in_month(store_name: str, year: int, month: int):
             labels[fid] = name
     return counts, labels
 
-
 def _safe_int(x, default=0):
     try:
         return int(x)
     except Exception:
         return default
-
 
 # ------------- 地圖：地址轉經緯度 -------------
 
@@ -120,7 +126,6 @@ def geocode_address(address):
     except Exception as e:
         print(f"[geocode_address] 失敗：{address} => {e}")
     return None, None
-
 
 # ------------- API 區 -------------
 
@@ -194,7 +199,6 @@ def get_all_store_revenue():
 
     return jsonify(result), 200
 
-
 @superadmin_bp.route("/get_store_flavor_sales", methods=["GET"])
 @token_required
 def get_store_flavor_sales():
@@ -229,7 +233,6 @@ def get_store_flavor_sales():
 
     return jsonify(result), 200
 
-
 @superadmin_bp.route("/get_summary_this_month", methods=["GET"])
 @token_required
 def get_summary_this_month():
@@ -251,7 +254,6 @@ def get_summary_this_month():
         total_orders += _sum_store_orders_between(store, start_dt, end_dt)
 
     return jsonify({"total_sales": int(total_sales), "total_orders": int(total_orders)}), 200
-
 
 @superadmin_bp.route("/get_top_flavors", methods=["GET"])
 @token_required
@@ -287,7 +289,6 @@ def get_top_flavors():
     result = [{"name": latest_labels.get(fid, fid), "value": int(qty)} for fid, qty in top10]
     return jsonify(result), 200
 
-
 @superadmin_bp.route("/get_my_stores", methods=["GET"])
 @token_required
 def get_my_stores():
@@ -296,7 +297,6 @@ def get_my_stores():
         return jsonify({"error": "僅限企業主使用"}), 403
     store_ids = user.get("store_ids", [])
     return jsonify({"stores": store_ids}), 200
-
 
 @superadmin_bp.route("/get_inventory_by_store", methods=["GET"])
 @token_required
@@ -316,7 +316,6 @@ def get_inventory_by_store():
         return jsonify({"store": store_name, "inventory": inventory}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @superadmin_bp.route("/get_store_revenue_rank", methods=["GET"])
 @token_required
@@ -348,7 +347,6 @@ def get_store_revenue_rank():
 
     store_sales.sort(key=lambda x: x["total_sales"], reverse=True)
     return jsonify(store_sales), 200
-
 
 @superadmin_bp.route("/get_store_locations", methods=["GET"])
 @token_required
@@ -420,98 +418,118 @@ def get_store_locations():
 
     return jsonify(store_list), 200
 
-
-# ============ 調貨（大老闆一鍵調貨＋記錄） ============
+# ===== 調貨：不異動庫存，僅把前端 payload 存成字串到 Firestore =====
 
 @superadmin_bp.route("/superadmin/transfer", methods=["OPTIONS"])
 def superadmin_transfer_preflight():
-    return ("", 204)
+    # 讓瀏覽器 CORS 預檢通過（即使沒全域 CORS 也可用）
+    origin = request.headers.get("Origin", "*")
+    resp = jsonify({})
+    resp.status_code = 204
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp
 
-@firestore.transactional
-def _do_transfer(tx, *, from_ref, to_ref, transfer_ref, data, user, qty):
-    from_snap = tx.get(from_ref)
-    to_snap = tx.get(to_ref)
-
-    if not from_snap.exists:
-        raise ValueError("來源分店沒有此食材")
-
-    from_qty = float((from_snap.to_dict() or {}).get("quantity", 0.0))
-    if from_qty < qty:
-        raise ValueError("來源庫存不足")
-
-    # 扣來源
-    tx.update(from_ref, {
-        "quantity": from_qty - qty,
-        "updated_at": firestore.SERVER_TIMESTAMP
-    })
-
-    # 加到目標
-    if to_snap.exists:
-        cur = float((to_snap.to_dict() or {}).get("quantity", 0.0))
-        tx.update(to_ref, {
-            "quantity": cur + qty,
-            "updated_at": firestore.SERVER_TIMESTAMP
-        })
-    else:
-        tx.set(to_ref, {
-            "name": data["ingredient_name"],
-            "unit": data["unit"],
-            "quantity": qty,
-            "updated_at": firestore.SERVER_TIMESTAMP
-        })
-
-    # 寫入調貨紀錄
-    tx.set(transfer_ref, {
-        "from_store": data["from_store"],
-        "to_store": data["to_store"],
-        "ingredient_id": data["ingredient_id"],
-        "ingredient_name": data["ingredient_name"],
-        "unit": data["unit"],
-        "quantity": qty,
-        "note": data.get("note", ""),
-        "executed_by": user.get("uid"),
-        "executed_at": firestore.SERVER_TIMESTAMP,
-        "status": "completed"
-    })
-
-
-@superadmin_bp.route("/superadmin/transfer", methods=["POST"])
+@superadmin_bp.route("/superadmin/transfer_ingredient", methods=["POST"])
 @token_required
-def superadmin_transfer():
-    user = request.user
+def transfer_ingredient():
+    user = request.user or {}
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
 
-    data = request.get_json() or {}
-    required = ["from_store", "to_store", "ingredient_id", "ingredient_name", "unit", "quantity"]
-    if any(k not in data for k in required):
-        return jsonify({"error": "缺少必要欄位"}), 400
+    data = request.get_json(silent=True) or {}
 
-    if data["from_store"] == data["to_store"]:
-        return jsonify({"error": "來源與目標分店不能相同"}), 400
+    from_store = data.get("from_store")
+    to_store   = data.get("to_store")
+    qty        = data.get("quantity")
+    unit       = data.get("unit")
+    # 對應參數（任選其一組）
+    from_ing_id   = data.get("from_ingredient_id") or data.get("ingredient_id")
+    to_ing_id     = data.get("to_ingredient_id")
+    ing_name      = data.get("ingredient_name")
 
+    # --- 基本驗證 ---
+    if not from_store or not to_store:
+        return jsonify({"error": "from_store / to_store 必填"}), 400
     try:
-        qty = float(data["quantity"])
+        qty = float(qty)
+        if qty <= 0:
+            raise ValueError()
     except Exception:
-        return jsonify({"error": "quantity 必須為數字"}), 400
-    if qty <= 0:
-        return jsonify({"error": "quantity 必須為正數"}), 400
+        return jsonify({"error": "quantity 必須是正數"}), 400
+    if not unit:
+        return jsonify({"error": "unit 必填"}), 400
 
-    from_ref = db.collection("stores").document(data["from_store"]).collection("ingredients").document(data["ingredient_id"])
-    to_ref = db.collection("stores").document(data["to_store"]).collection("ingredients").document(data["ingredient_id"])
-    transfer_ref = db.collection("transfers").document()
+    # --- 取得兩邊的 doc ref（支援多種對應法） ---
+    from_ref = _get_ing_doc_ref(from_store, from_ing_id, ing_name)
+    to_ref   = _get_ing_doc_ref(to_store,   to_ing_id,   ing_name)
+
+    if not from_ref:
+        return jsonify({"error": f"來源店找不到對應食材文件（store={from_store}, "
+                                 f"id={from_ing_id}, name={ing_name}）"}), 404
+    if not to_ref:
+        return jsonify({"error": f"目的店找不到對應食材文件（store={to_store}, "
+                                 f"id={to_ing_id}, name={ing_name}）"}), 404
+
+    # --- 在 Firestore 交易中讀/驗證/更新，確保原子性 ---
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def _tx(transaction, from_ref, to_ref, qty, unit):
+        # ✅ 交易中請用 transaction.get(...)
+        from_snap = transaction.get(from_ref)
+        to_snap   = transaction.get(to_ref)
+
+        if not from_snap.exists:
+            raise ValueError("來源店食材不存在")
+        if not to_snap.exists:
+            raise ValueError("目的店食材不存在")
+
+        from_data = from_snap.to_dict() or {}
+        to_data   = to_snap.to_dict() or {}
+
+        # 單位一致性檢查（可放寬為相容單位換算）
+        from_unit = from_data.get("unit")
+        to_unit   = to_data.get("unit")
+        if _norm(from_unit) != _norm(unit) or _norm(to_unit) != _norm(unit):
+            raise ValueError(f"單位不一致：from={from_unit}, to={to_unit}, req={unit}")
+
+        from_qty = float(from_data.get("quantity", 0))
+        to_qty   = float(to_data.get("quantity", 0))
+
+        if from_qty < qty:
+            raise ValueError(f"庫存不足：來源可用 {from_qty} < 轉出 {qty}")
+
+        # 在同一交易中更新兩邊
+        transaction.update(from_ref, {"quantity": from_qty - qty})
+        transaction.update(to_ref,   {"quantity": to_qty + qty})
 
     try:
-        # ✅ 直接呼叫，transactional 會自動建立 transaction
-        _do_transfer(from_ref=from_ref,
-                     to_ref=to_ref,
-                     transfer_ref=transfer_ref,
-                     data=data,
-                     user=user,
-                     qty=qty)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        # ✅ 正確：用 transactional 包裝後，帶入 transaction 物件與參數呼叫
+        _tx(transaction, from_ref, to_ref, qty, unit)
+    except ValueError as ve:
+        # 業務邏輯錯誤
+        return jsonify({"ok": False, "error": str(ve)}), 400
     except Exception as e:
-        return jsonify({"error": f"調貨失敗：{e}"}), 500
+        return jsonify({"ok": False, "error": f"交易失敗：{e}"}), 500
 
-    return jsonify({"ok": True, "transfer_id": transfer_ref.id}), 200
+    # --- 成功後寫入交易紀錄（可查審計）---
+    payload_str = json.dumps(data, ensure_ascii=False)
+    log = {
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "created_by": user.get("uid"),
+        "from_store": from_store,
+        "to_store": to_store,
+        "from_ingredient_id": from_ing_id,
+        "to_ingredient_id": to_ing_id,
+        "ingredient_name": ing_name,
+        "quantity": qty,
+        "unit": unit,
+        "payload_str": payload_str,
+        "status": "success",
+    }
+    db.collection("transaction").add(log)
+
+    return jsonify({"ok": True, "message": "調貨成功（已原子更新兩店庫存）"}), 200

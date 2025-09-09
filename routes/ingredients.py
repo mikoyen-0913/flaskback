@@ -221,3 +221,4 @@ def refresh_inventory_by_sales():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
