@@ -4,8 +4,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.cloud import firestore
 
-# 如果你的 firebase_config.py 目前是匯出全域 db（你現在就是）
-# 這裡先沿用，不破壞你現有 routes 的寫法
 from firebase_config import db
 
 # ===== 載入 Blueprint 模組 =====
@@ -21,21 +19,23 @@ from routes.superadmin import superadmin_bp
 app = Flask(__name__)
 
 # ===== CORS 設定（用環境變數 ALLOWED_ORIGINS 控制）=====
-# 例如：ALLOWED_ORIGINS="http://localhost:3000,https://yaoyaoproject-88907.web.app,https://your-flask.onrender.com"
-_allowed = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,https://yaoyaoproject-88907.web.app",
-    "https://flaskback-9jcb.onrender.com",
-    "http://192.168.100.7:3000"
-)
+# 例：ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://192.168.100.7:3000,https://你的前端站.onrender.com"
+_default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://192.168.100.7:3000",
+    "https://flaskback-9jcb.onrender.com",   # 後端自己（可留可去，無妨）
+    # "https://你的前端站名.onrender.com",  # 前端上線後記得加進來
+]
+_allowed = os.getenv("ALLOWED_ORIGINS", ",".join(_default_origins))
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
 
 CORS(
     app,
-    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
     supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
+    origins=ALLOWED_ORIGINS,
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ===== 註冊 Blueprint =====
@@ -108,9 +108,8 @@ def public_menus():
         return jsonify({"error": str(e)}), 500
 
 
-# ===== 主程式入口（Render 會設定 PORT，不要寫死 5000）=====
+# ===== 主程式入口（本地執行；在 Render 由 gunicorn 啟動）=====
 if __name__ == "__main__":
-    # 顯示所有註冊路由，方便本地除錯
     with app.test_request_context():
         print("✅ Registered Routes:")
         print(app.url_map)
