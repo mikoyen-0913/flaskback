@@ -26,6 +26,7 @@ _allowed = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,https://yaoyaoproject-88907.web.app"
     "https://flaskback-9jcb.onrender.com"
+    "http://192.168.100.7:3000"
 )
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
 
