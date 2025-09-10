@@ -8,6 +8,8 @@ import requests
 from collections import defaultdict
 from google.cloud import firestore
 import json
+from google.cloud.firestore_v1 import FieldFilter
+
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
@@ -418,11 +420,10 @@ def get_store_locations():
 
     return jsonify(store_list), 200
 
-# ===== 調貨：不異動庫存，僅把前端 payload 存成字串到 Firestore =====
+# ===== 調貨：CORS 預檢（/superadmin/transfer 用） =====
 
 @superadmin_bp.route("/superadmin/transfer", methods=["OPTIONS"])
 def superadmin_transfer_preflight():
-    # 讓瀏覽器 CORS 預檢通過（即使沒全域 CORS 也可用）
     origin = request.headers.get("Origin", "*")
     resp = jsonify({})
     resp.status_code = 204
@@ -431,6 +432,8 @@ def superadmin_transfer_preflight():
     resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     resp.headers["Access-Control-Allow-Credentials"] = "true"
     return resp
+
+# ===== 調貨：實作庫存轉移 & 紀錄 =====
 
 @superadmin_bp.route("/superadmin/transfer_ingredient", methods=["POST"])
 @token_required
@@ -446,9 +449,9 @@ def transfer_ingredient():
     qty        = data.get("quantity")
     unit       = data.get("unit")
     # 對應參數（任選其一組）
-    from_ing_id   = data.get("from_ingredient_id") or data.get("ingredient_id")
-    to_ing_id     = data.get("to_ingredient_id")
-    ing_name      = data.get("ingredient_name")
+    from_ing_id = data.get("from_ingredient_id") or data.get("ingredient_id")
+    to_ing_id   = data.get("to_ingredient_id")
+    ing_name    = data.get("ingredient_name")
 
     # --- 基本驗證 ---
     if not from_store or not to_store:
@@ -462,25 +465,22 @@ def transfer_ingredient():
     if not unit:
         return jsonify({"error": "unit 必填"}), 400
 
-    # --- 取得兩邊的 doc ref（支援多種對應法） ---
+    # --- 取得兩邊的 doc ref（支援 id 或 name 對應） ---
     from_ref = _get_ing_doc_ref(from_store, from_ing_id, ing_name)
     to_ref   = _get_ing_doc_ref(to_store,   to_ing_id,   ing_name)
 
     if not from_ref:
-        return jsonify({"error": f"來源店找不到對應食材文件（store={from_store}, "
-                                 f"id={from_ing_id}, name={ing_name}）"}), 404
+        return jsonify({"error": f"來源店找不到對應食材文件（store={from_store}, id={from_ing_id}, name={ing_name}）"}), 404
     if not to_ref:
-        return jsonify({"error": f"目的店找不到對應食材文件（store={to_store}, "
-                                 f"id={to_ing_id}, name={ing_name}）"}), 404
+        return jsonify({"error": f"目的店找不到對應食材文件（store={to_store}, id={to_ing_id}, name={ing_name}）"}), 404
 
-    # --- 在 Firestore 交易中讀/驗證/更新，確保原子性 ---
+    # --- Firestore 交易：原子讀寫與驗證 ---
     transaction = db.transaction()
 
     @firestore.transactional
     def _tx(transaction, from_ref, to_ref, qty, unit):
-        # ✅ 交易中請用 transaction.get(...)
-        from_snap = transaction.get(from_ref)
-        to_snap   = transaction.get(to_ref)
+        from_snap = from_ref.get(transaction=transaction)
+        to_snap   = to_ref.get(transaction=transaction)
 
         if not from_snap.exists:
             raise ValueError("來源店食材不存在")
@@ -490,32 +490,29 @@ def transfer_ingredient():
         from_data = from_snap.to_dict() or {}
         to_data   = to_snap.to_dict() or {}
 
-        # 單位一致性檢查（可放寬為相容單位換算）
-        from_unit = from_data.get("unit")
-        to_unit   = to_data.get("unit")
-        if _norm(from_unit) != _norm(unit) or _norm(to_unit) != _norm(unit):
-            raise ValueError(f"單位不一致：from={from_unit}, to={to_unit}, req={unit}")
+        # 單位一致性檢查
+        from_unit = (from_data.get("unit") or "").strip().lower()
+        to_unit   = (to_data.get("unit") or "").strip().lower()
+        req_unit  = (unit or "").strip().lower()
+        if from_unit != req_unit or to_unit != req_unit:
+            raise ValueError(f"單位不一致：from={from_data.get('unit')}, to={to_data.get('unit')}, req={unit}")
 
         from_qty = float(from_data.get("quantity", 0))
         to_qty   = float(to_data.get("quantity", 0))
-
         if from_qty < qty:
             raise ValueError(f"庫存不足：來源可用 {from_qty} < 轉出 {qty}")
 
-        # 在同一交易中更新兩邊
         transaction.update(from_ref, {"quantity": from_qty - qty})
         transaction.update(to_ref,   {"quantity": to_qty + qty})
 
     try:
-        # ✅ 正確：用 transactional 包裝後，帶入 transaction 物件與參數呼叫
         _tx(transaction, from_ref, to_ref, qty, unit)
     except ValueError as ve:
-        # 業務邏輯錯誤
         return jsonify({"ok": False, "error": str(ve)}), 400
     except Exception as e:
         return jsonify({"ok": False, "error": f"交易失敗：{e}"}), 500
 
-    # --- 成功後寫入交易紀錄（可查審計）---
+    # --- 成功後寫入交易紀錄 ---
     payload_str = json.dumps(data, ensure_ascii=False)
     log = {
         "created_at": firestore.SERVER_TIMESTAMP,
@@ -533,3 +530,87 @@ def transfer_ingredient():
     db.collection("transaction").add(log)
 
     return jsonify({"ok": True, "message": "調貨成功（已原子更新兩店庫存）"}), 200
+
+# ===== 調貨紀錄：CORS 預檢 + 查詢 API =====
+
+@superadmin_bp.route("/superadmin/transfer_logs", methods=["OPTIONS"])
+def transfer_logs_preflight():
+    """
+    讓瀏覽器 CORS 預檢通過（與 /superadmin/transfer 的 OPTIONS 寫法一致）
+    """
+    origin = request.headers.get("Origin", "*")
+    resp = jsonify({})
+    resp.status_code = 204
+    resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp  # 204 No Content
+
+
+@superadmin_bp.route("/superadmin/transfer_logs", methods=["GET"])
+@token_required
+def get_transfer_logs():
+    """
+    取得調貨紀錄（transaction 集合）
+    可選參數：
+      from_store, to_store, ingredient（完整比對 ingredient_name）, limit(預設100, 最多500)
+    """
+    user = request.user or {}
+    if user.get("role") != "superadmin":
+        return jsonify({"error": "你不是企業主"}), 403
+
+    from_store = request.args.get("from_store") or ""
+    to_store   = request.args.get("to_store") or ""
+    ingredient = request.args.get("ingredient") or ""
+    try:
+        limit = int(request.args.get("limit", 100))
+    except Exception:
+        limit = 100
+    limit = max(1, min(limit, 500))
+
+    try:
+        q = db.collection("transaction")
+        if from_store:
+            q = q.where(filter=FieldFilter("from_store", "==", from_store))
+        if to_store:
+            q = q.where(filter=FieldFilter("to_store", "==", to_store))
+        if ingredient:
+            q = q.where(filter=FieldFilter("ingredient_name", "==", ingredient))
+
+        # 不在 Firestore 端 order_by，避免複合索引需求/型別不一致導致 500
+        q = q.limit(limit)
+
+        rows = []
+        for doc in q.stream():
+            d = doc.to_dict() or {}
+            ts = d.get("created_at")
+            # 安全轉 ISO（可能是 Timestamp/字串/None）
+            try:
+                created_at = ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts is not None else None)
+            except Exception:
+                created_at = str(ts) if ts is not None else None
+
+            rows.append({
+                "id": doc.id,
+                "created_at": created_at,
+                "from_store": d.get("from_store"),
+                "to_store": d.get("to_store"),
+                "ingredient_name": d.get("ingredient_name"),
+                "quantity": d.get("quantity"),
+                "unit": d.get("unit"),
+                "created_by": d.get("created_by"),
+                "status": d.get("status"),
+            })
+
+        # Python 端安全排序（None 置底）
+        rows.sort(key=lambda r: (r.get("created_at") is None, r.get("created_at")), reverse=True)
+
+        resp = jsonify({"logs": rows})
+        origin = request.headers.get("Origin", "*")
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        return resp, 200
+
+    except Exception as e:
+        return jsonify({"error": f"查詢失敗: {e}"}), 500
