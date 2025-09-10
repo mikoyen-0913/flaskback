@@ -9,7 +9,7 @@ from collections import defaultdict
 from google.cloud import firestore
 import json
 from google.cloud.firestore_v1 import FieldFilter
-
+import os
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
@@ -108,27 +108,55 @@ def _safe_int(x, default=0):
 # ------------- 地圖：地址轉經緯度 -------------
 
 def geocode_address(address):
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": address,
-        "format": "json",
-        "limit": 1,
-        "countrycodes": "tw",
-        "accept-language": "zh-TW",
-    }
-    headers = {"User-Agent": "yaoyao-superadmin-map"}
+    """
+    優先用 Google Geocoding；失敗再退回 OSM。
+    回傳 (lat, lon)；若都失敗回 (None, None)
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
 
+    # --- Google 優先 ---
+    if api_key:
+        try:
+            g_url = "https://maps.googleapis.com/maps/api/geocode/json"
+            params = {
+                "address": address,
+                "region": "tw",
+                "language": "zh-TW",
+                "key": api_key,
+            }
+            resp = requests.get(g_url, params=params, timeout=8)
+            resp.raise_for_status()
+            j = resp.json()
+            if j.get("status") == "OK" and j.get("results"):
+                loc = j["results"][0]["geometry"]["location"]
+                return float(loc["lat"]), float(loc["lng"])
+            else:
+                print(f"[geocode_address][Google] 失敗：{j.get('status')}")
+        except Exception as e:
+            print(f"[geocode_address][Google] 例外：{address} => {e}")
+
+    # --- OSM fallback ---
     try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "tw",
+            "accept-language": "zh-TW",
+        }
+        headers = {"User-Agent": "yaoyao-superadmin-map"}
         resp = requests.get(url, params=params, headers=headers, timeout=8)
+        resp.raise_for_status()
         data = resp.json()
         if data:
             lat = float(data[0]["lat"])
             lon = float(data[0]["lon"])
             return lat, lon
     except Exception as e:
-        print(f"[geocode_address] 失敗：{address} => {e}")
-    return None, None
+        print(f"[geocode_address][OSM] 失敗：{address} => {e}")
 
+    return None, None
 # ------------- API 區 -------------
 
 @superadmin_bp.route("/get_all_store_revenue", methods=["GET"])

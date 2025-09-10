@@ -9,34 +9,67 @@ import requests
 import traceback
 from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional, Tuple
-
+import os
 inventory_bp = Blueprint("inventory", __name__)
 
 # -------------------------------
-# 地址 → GPS（OpenStreetMap）
+# 地址 → GPS（Google → OSM fallback）
 # -------------------------------
+import os
+import requests
+from typing import Tuple
+
 def geocode_address(address: str) -> Tuple[float, float]:
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": address,
-        "format": "json",
-        "limit": 1,
-        "countrycodes": "tw",
-        "accept-language": "zh-TW",
-    }
+    """
+    優先用 Google Geocoding；失敗才退回 OpenStreetMap。
+    需在環境變數設定 GOOGLE_API_KEY。
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            g_url = "https://maps.googleapis.com/maps/api/geocode/json"
+            params = {
+                "address": address,
+                "region": "tw",       # 優先台灣結果
+                "language": "zh-TW",
+                "key": api_key,
+            }
+            r = requests.get(g_url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("status") == "OK" and data.get("results"):
+                loc = data["results"][0]["geometry"]["location"]
+                lat, lon = float(loc["lat"]), float(loc["lng"])
+                print(f"📍(Google) 地址轉換成功：{address} → ({lat}, {lon})")
+                return lat, lon
+            else:
+                print(f"⚠️(Google) geocode 失敗：{data.get('status')}")
+        except Exception as e:
+            print(f"❌(Google) 地址轉換例外：{e}")
+
+    # --- Fallback：OpenStreetMap Nominatim ---
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"})
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "tw",
+            "accept-language": "zh-TW",
+        }
+        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         r.raise_for_status()
         data = r.json()
         if data:
             lat = float(data[0]["lat"])
             lon = float(data[0]["lon"])
-            print(f"📍 地址轉換成功：{address} → ({lat}, {lon})")
+            print(f"📍(OSM) 地址轉換成功：{address} → ({lat}, {lon})")
             return lat, lon
     except Exception as e:
-        print(f"❌ 地址轉換失敗：{e}")
-    # fallback：台中中區
-    return 24.15, 120.65
+        print(f"❌(OSM) 地址轉換失敗：{e}")
+
+    # 兩者都失敗：給台北市政府附近座標，避免整個流程中斷
+    return 25.0375, 121.5637
 
 
 # -------------------------------
