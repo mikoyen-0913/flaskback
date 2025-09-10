@@ -25,6 +25,7 @@ app = Flask(__name__)
 _allowed = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,https://yaoyaoproject-88907.web.app"
+    "https://flaskback-9jcb.onrender.com"
 )
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
 
