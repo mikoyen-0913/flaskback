@@ -43,14 +43,20 @@ def _reverse_city_from_google(lat: float, lon: float) -> Optional[str]:
 
 def _parse_fc0032_001_for_city(j: dict, want_city: str) -> List[Dict[str, float]]:
     """
-    從 F-C0032-001 的回應中，挑出指定城市的資料（若伺服器沒過濾成功，就改用本地比對）。
+    從 F-C0032-001 回應中挑出 want_city 的資料，並兼容：
+    - PoP12h 或 PoP 兩種名稱
+    - 數值可能在 time[i].parameter.parameterName 或 time[i].elementValue[0].value
+    - 各時間序列長度不一致時，盡量合併可用資訊
     """
-    records = j.get("records", {})
-    locations = records.get("location", [])
+    def _first(lst):
+        return lst[0] if isinstance(lst, list) and lst else None
+
+    records = j.get("records") or {}
+    locations = records.get("location") or []
     if not locations:
         return []
 
-    # 先找完全相等，再退而求其次「包含」
+    # 先精準比對，再包含比對
     match = None
     for loc in locations:
         if loc.get("locationName") == want_city:
@@ -63,31 +69,81 @@ def _parse_fc0032_001_for_city(j: dict, want_city: str) -> List[Dict[str, float]
                 match = loc
                 break
     if match is None:
-        # 找不到就拿第一個，但外面會警告
         match = locations[0]
 
-    wx_elements = {e["elementName"]: e for e in match.get("weatherElement", []) if "elementName" in e}
-    def series(name):
-        return wx_elements.get(name, {}).get("time", []) if wx_elements.get(name) else []
+    # 轉成 {elementName: time[]} 映射
+    wx_elements = {}
+    for e in match.get("weatherElement", []):
+        name = e.get("elementName")
+        if not name:
+            continue
+        wx_elements[name] = e.get("time") or []
 
-    pop12 = series("PoP12h")
-    minT  = series("MinT")
-    maxT  = series("MaxT")
+    # 可能名稱：PoP12h 或 PoP
+    pop_series  = wx_elements.get("PoP12h") or wx_elements.get("PoP") or []
+    minT_series = wx_elements.get("MinT")   or []
+    maxT_series = wx_elements.get("MaxT")   or []
+
+    # 讀取每個 time block 的數值（相容兩種資料結構）
+    def _read_value(block) -> Optional[float]:
+        if not isinstance(block, dict):
+            return None
+        # 結構 1：time.parameter.parameterName
+        p = block.get("parameter")
+        if isinstance(p, dict):
+            val = p.get("parameterName") or p.get("parameterValue")
+            if val not in (None, ""):
+                try:
+                    return float(val)
+                except Exception:
+                    pass
+        # 結構 2：time.elementValue[0].value
+        ev = _first(block.get("elementValue"))
+        if isinstance(ev, dict):
+            val = ev.get("value")
+            if val not in (None, ""):
+                try:
+                    return float(val)
+                except Exception:
+                    pass
+        return None
+
+    # 取可用長度（最多取 3 段，對齊方式：能取到就取，取不到就用前後補）
+    L = max(len(pop_series), len(minT_series), len(maxT_series), 3)
+    L = min(L, 3)
 
     out: List[Dict[str, float]] = []
-    n = min(3, len(pop12), len(minT), len(maxT))
-    for i in range(n):
-        try:
-            p = float(pop12[i]["parameter"]["parameterName"])
-        except Exception:
-            p = 0.0
-        try:
-            tmin = float(minT[i]["parameter"]["parameterName"])
-            tmax = float(maxT[i]["parameter"]["parameterName"])
-            t = (tmin + tmax) / 2.0
-        except Exception:
-            t = 25.0
-        out.append({"rainfall": round(p, 1), "temperature": round(t, 1)})
+    last_pop = 0.0
+    last_t   = 25.0
+
+    for i in range(L):
+        # 降雨機率
+        pop_block = pop_series[i] if i < len(pop_series) else None
+        pop = _read_value(pop_block)
+        if pop is None:
+            pop = last_pop  # 補前值
+        # 溫度（取 Min/Max 平均，缺一就用另一個）
+        min_block = minT_series[i] if i < len(minT_series) else None
+        max_block = maxT_series[i] if i < len(maxT_series) else None
+        tmin = _read_value(min_block)
+        tmax = _read_value(max_block)
+        if tmin is None and tmax is None:
+            t = last_t
+        elif tmin is None:
+            t = float(tmax)
+        elif tmax is None:
+            t = float(tmin)
+        else:
+            t = (float(tmin) + float(tmax)) / 2.0
+
+        last_pop = float(pop if pop is not None else 0.0)
+        last_t   = float(t)
+
+        out.append({
+            "rainfall": round(last_pop, 1),
+            "temperature": round(last_t, 1),
+        })
+
     return out
 
 def _http_get(url: str, params: dict, headers: dict):
