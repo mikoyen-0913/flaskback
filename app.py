@@ -1,3 +1,7 @@
+import os, certifi
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+os.environ.setdefault("CURL_CA_BUNDLE", certifi.where())
 # app.py — Render-ready
 import os
 from flask import Flask, request, jsonify
