@@ -1,24 +1,29 @@
 # routes/inventory_checker.py
 from flask import Blueprint, request, jsonify
 from routes.auth import token_required
-from tool.weather_from_rest import fetch_weather_from_rest  
+
+# --- 天氣改用 REST 版 ---
+# 若你的專案是放在 tool/ 資料夾，保持這行即可；若不在 tool/，可改成 from weather_from_rest import ...
+try:
+    from tool.weather_from_rest import fetch_weather_from_rest
+except Exception:
+    from weather_from_rest import fetch_weather_from_rest  # 後備匯入路徑
+
 from tool.lstm_predict_all import forecast_next_sales, load_models_and_data
 from tool.firebase_fetcher import fetch_ingredient_inventory, fetch_recipes
 from tool.ingredient_demand import calculate_total_demand
+
+import os
 import requests
 import traceback
 from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional, Tuple
-import os
+
 inventory_bp = Blueprint("inventory", __name__)
 
 # -------------------------------
 # 地址 → GPS（Google → OSM fallback）
 # -------------------------------
-import os
-import requests
-from typing import Tuple
-
 def geocode_address(address: str) -> Tuple[float, float]:
     """
     優先用 Google Geocoding；失敗才退回 OpenStreetMap。
@@ -57,7 +62,12 @@ def geocode_address(address: str) -> Tuple[float, float]:
             "countrycodes": "tw",
             "accept-language": "zh-TW",
         }
-        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        r = requests.get(
+            url,
+            params=params,
+            headers={"User-Agent": "yaoyao-backend/1.0"},
+            timeout=8,
+        )
         r.raise_for_status()
         data = r.json()
         if data:
@@ -183,16 +193,15 @@ def check_inventory():
         # 1) GPS
         lat, lon = geocode_address(address)
 
-        # 2) 天氣（給需求預測用）
-        api_key = "CWA-6FAB80A3-75EF-4555-86C3-A026F8F0E564"
-        forecast_data = fetch_weather_from_graphql(lat, lon, api_key)
+        # 2) 天氣（給需求預測用）— 改用 REST 版
+        forecast_data = fetch_weather_from_rest(lat, lon)
         if not forecast_data:
             return jsonify({"error": "氣象資料取得失敗"}), 400
 
-        # 3) 模型
+        # 3) 載入模型與資料
         models, scalers, pivot_df, flavors = load_models_and_data()
 
-        # 4) 預測
+        # 4) 預測未來需求（把 3 個時段的預測量加總）
         predicted_sales: Dict[str, float] = {}
         for flavor in flavors:
             model = models.get(flavor)
