@@ -1,7 +1,7 @@
 # routes/inventory_checker.py
 from flask import Blueprint, request, jsonify
 from routes.auth import token_required
-from tool.weather_from_graphql import fetch_weather_from_graphql
+from tool.weather_from_rest import fetch_weather_from_rest  
 from tool.lstm_predict_all import forecast_next_sales, load_models_and_data
 from tool.firebase_fetcher import fetch_ingredient_inventory, fetch_recipes
 from tool.ingredient_demand import calculate_total_demand
