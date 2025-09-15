@@ -28,8 +28,9 @@ _default_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://192.168.100.7:3000",
-    "https://flaskback-9jcb.onrender.com",   # 後端自己（可留可去，無妨）
+    " http://163.13.14.137:3000",   # 後端自己（可留可去，無妨）
     " http://163.13.54.132:3000 ",
+    "http://192.168.100.6:3000 ",
     # "https://你的前端站名.onrender.com",  # 前端上線後記得加進來
 ]
 _allowed = os.getenv("ALLOWED_ORIGINS", ",".join(_default_origins))
