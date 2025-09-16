@@ -32,7 +32,7 @@ _default_origins = [
     " http://163.13.54.132:3000 ",
     "http://192.168.100.6:3000 ",
     "http://163.13.48.116:3000",
-    # "https://你的前端站名.onrender.com",  # 前端上線後記得加進來
+    "https://yaoyaoproject-88907.web.app",
 ]
 _allowed = os.getenv("ALLOWED_ORIGINS", ",".join(_default_origins))
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
