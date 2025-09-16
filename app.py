@@ -33,6 +33,9 @@ _default_origins = [
     "http://192.168.100.6:3000 ",
     "http://163.13.48.116:3000",
     "https://yaoyaoproject-88907.web.app",
+    "https://yaoyao-admin.web.app",
+    "https://yaoyao-customer.web.app",
+    
 ]
 _allowed = os.getenv("ALLOWED_ORIGINS", ",".join(_default_origins))
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
