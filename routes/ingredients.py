@@ -2,6 +2,9 @@ from flask import Blueprint, request, jsonify
 from firebase_config import db
 from routes.auth import token_required
 from google.cloud import firestore
+from datetime import datetime
+from zoneinfo import ZoneInfo  
+TZ = ZoneInfo("Asia/Taipei")
 
 ingredients_bp = Blueprint('ingredients', __name__)
 ingredients_collection = "ingredients"
@@ -134,38 +137,55 @@ def restock_ingredients():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ 自動依訂單扣除食材庫存（補入功能）
+
+# ✅ 自動依訂單扣除食材庫存（只處理『今天』）
 @ingredients_bp.route('/refresh_inventory_by_sales', methods=['POST'])
 @token_required
 def refresh_inventory_by_sales():
     try:
         store_name = request.user.get("store_name")
-        completed_orders_ref = db.collection("stores").document(store_name).collection("completed_orders")
+
+        # 只看今天的 completed_orders：stores/{store}/dates/{YYYYMMDD}/completed_orders
+        today_str = datetime.now(TZ).strftime("%Y%m%d")
+        completed_orders_ref = (
+            db.collection("stores")
+              .document(store_name)
+              .collection("dates")
+              .document(today_str)
+              .collection("completed_orders")
+        )
         orders = completed_orders_ref.where("used_in_inventory_refresh", "==", False).stream()
 
         sales_count = {}
         processed_ids = []
 
         for doc in orders:
-            order = doc.to_dict()
+            order = doc.to_dict() or {}
             processed_ids.append(doc.id)
             for item in order.get("items", []):
                 name = item.get("menu_name")
                 qty = item.get("quantity", 0)
+                if not name:
+                    continue
+                try:
+                    qty = float(qty)
+                except Exception:
+                    qty = 0
                 sales_count[name] = sales_count.get(name, 0) + qty
 
         UNIT_ALIAS = {"g": "克", "kg": "克", "ml": "毫升", "l": "毫升", "公克": "克", "公升": "毫升"}
         MULTIPLIER = {("kg", "克"): 1000, ("l", "毫升"): 1000}
 
         def normalize_unit(u):
-            return UNIT_ALIAS.get(u.strip().lower(), u.strip())
+            s = str(u).strip()
+            return UNIT_ALIAS.get(s.lower(), s)
 
         def convert_amount(ingredient_unit, recipe_unit, amount):
             key = (ingredient_unit, recipe_unit)
             if key in MULTIPLIER:
-                return amount / MULTIPLIER[key]
+                return amount / MULTIPLIER[key]         # 庫存→食譜
             elif (recipe_unit, ingredient_unit) in MULTIPLIER:
-                return amount * MULTIPLIER[(recipe_unit, ingredient_unit)]
+                return amount * MULTIPLIER[(recipe_unit, ingredient_unit)]  # 食譜→庫存
             return amount
 
         ingredient_deduction = {}
@@ -174,51 +194,54 @@ def refresh_inventory_by_sales():
             recipe_doc = db.collection("recipes").document(menu_name).get()
             if not recipe_doc.exists:
                 continue
-            recipe = recipe_doc.to_dict()
+            recipe = recipe_doc.to_dict() or {}
+
             for ing_name, detail in recipe.items():
                 recipe_amt = detail.get("amount", 0)
                 recipe_unit = normalize_unit(detail.get("unit", ""))
 
-                ing_query = db.collection("stores").document(store_name).collection("ingredients").where("name", "==", ing_name).limit(1).stream()
+                ing_query = (
+                    db.collection("stores")
+                      .document(store_name)
+                      .collection("ingredients")
+                      .where("name", "==", ing_name)
+                      .limit(1)
+                ).stream()
+
                 for ing_doc in ing_query:
                     ing_id = ing_doc.id
-                    ing_data = ing_doc.to_dict()
+                    ing_data = ing_doc.to_dict() or {}
                     ing_unit = normalize_unit(ing_data.get("unit", ""))
 
                     try:
-                        # 強制將數值轉換成 float
                         recipe_amt = float(recipe_amt)
-                        total_qty = float(total_qty)
+                        total_qty  = float(total_qty)
                     except (ValueError, TypeError):
                         return jsonify({"error": f"{ing_name} 的數值格式錯誤（recipe_amt: {recipe_amt}, qty: {total_qty}）"}), 400
 
-                    if recipe_unit != ing_unit:
-                        try:
-                            adjusted_amt = convert_amount(ing_unit, recipe_unit, recipe_amt)
-                        except Exception as e:
-                            return jsonify({"error": f"{ing_name} 單位不符且無法轉換：{str(e)}"}), 400
-                    else:
-                        adjusted_amt = recipe_amt
-
-                    try:
-                        final_deduction = float(adjusted_amt) * float(total_qty)
-                    except Exception as e:
-                        return jsonify({"error": f"無法計算扣除量（{ing_name}）：{str(e)}"}), 400
+                    adjusted_amt = convert_amount(ing_unit, recipe_unit, recipe_amt) if recipe_unit != ing_unit else recipe_amt
+                    final_deduction = float(adjusted_amt) * float(total_qty)
 
                     ingredient_deduction[ing_id] = ingredient_deduction.get(ing_id, 0) + final_deduction
 
+        # 扣庫存 + 標記訂單（使用 Increment）
         for ing_id, deduction in ingredient_deduction.items():
-            ing_ref = db.collection("stores").document(store_name).collection("ingredients").document(ing_id)
+            ing_ref = (
+                db.collection("stores")
+                  .document(store_name)
+                  .collection("ingredients")
+                  .document(ing_id)
+            )
             ing_ref.update({"quantity": firestore.Increment(-deduction)})
 
         for doc_id in processed_ids:
             completed_orders_ref.document(doc_id).update({"used_in_inventory_refresh": True})
 
         return jsonify({
-            "message": "即時庫存已更新",
+            "message": f"{today_str} 即時庫存已更新",
+            "processed_orders": len(processed_ids),
             "deducted_ingredients": ingredient_deduction
         }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
