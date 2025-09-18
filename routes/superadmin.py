@@ -60,6 +60,14 @@ def _get_daily_summary(store_name: str, dt: date):
     snap = doc_ref.get()
     return snap.to_dict() if snap.exists else None
 
+def _ym_keys_for_year(year: int):
+    return [f"{year}{m:02d}" for m in range(1, 13)]
+
+def _monthly_doc_ref(store: str, yyyymm: str):
+    return (db.collection("stores").document(store)
+              .collection("months").document(yyyymm)
+              .collection("monthly_summary").document("summary"))
+
 def _sum_store_revenue_between(store_name: str, start_dt: date, end_dt_exclusive: date) -> int:
     """用 daily_summary 累加指定區間的 revenue"""
     total = 0
@@ -104,6 +112,20 @@ def _safe_int(x, default=0):
         return int(x)
     except Exception:
         return default
+
+# 固定菜單對照表（menu_id → 中文名稱）
+MENU_ID_TO_NAME = {
+    "3VfLsB3SiyuoTlM4GaJ": "巧克力",
+    "6PRuy7bKGyLBm4KMEJL": "OREO鮮奶油",
+    "77UxA3bJBWoFDqX5DzZY": "抹茶麻糬",
+    "Dy0yTpP3UHolYm7B7cZcF": "紅豆",
+    "GBaSoOy1xpfRe84hYrh": "可可布朗尼",
+    "NfwKvNfnwxW1tKGb0oi": "珍珠鮮奶油",
+    "QYo2B71FnXXcJiL1Si1Z": "奶油",
+    "aWggBPCNenfGFq0f3zbq": "黑芝麻鮮奶油",
+    "n4YigbOVv2YQpAi6t0BU": "花生",
+    "sNk2RNReyIZz58vifCm": "紅豆麻糬",
+}
 
 # ------------- 地圖：地址轉經緯度 -------------
 
@@ -217,13 +239,32 @@ def get_all_store_revenue():
 
     elif range_type == "year":
         y = int(request.args.get("year", today.year))
-        labels = [f"{m}月" for m in range(1, 12 + 1)]
+
+        # 固定 12 個月份鍵與對應的標籤
+        ym_keys = _ym_keys_for_year(y)                    # ["202501", …, "202512"]
+        labels = [f"{int(ym[4:6])}月" for ym in ym_keys]  # ["1月", …, "12月"]
+
         for store in store_names:
-            month_totals = []
-            for m in range(1, 13):
-                start_dt, end_dt = _month_range(y, m)
-                month_totals.append(_sum_store_revenue_between(store, start_dt, end_dt))
-            result.append({"store_name": store, "dates": labels, "revenues": month_totals})
+            # 批次抓該店 12 個 monthly_summary
+            refs = [_monthly_doc_ref(store, ym) for ym in ym_keys]
+            docs = db.get_all(refs)
+
+            # 建 monthly -> revenue 對照，有文件就讀值，沒有就缺席（之後補 0）
+            month_to_rev = {}
+            for doc in docs:
+                parts = doc.reference.path.split("/")
+                yyyymm = parts[parts.index("months") + 1] if "months" in parts else None
+                if not yyyymm:
+                    continue
+                if doc.exists:
+                    data = doc.to_dict() or {}
+                    rev = float(data.get("total_revenue", data.get("revenue", 0)) or 0)
+                    month_to_rev[yyyymm] = round(rev, 2)
+
+            # 依固定 12 個月份輸出，缺的就填 0
+            revenues = [month_to_rev.get(ym, 0) for ym in ym_keys]
+            result.append({"store_name": store, "dates": labels, "revenues": revenues})
+
     else:
         return jsonify({"error": "range 參數錯誤，允許值：7days / month / year"}), 400
 
@@ -241,6 +282,7 @@ def get_store_flavor_sales():
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
 
+    # 解析參數 month
     month_str = request.args.get("month")
     if not month_str:
         return jsonify({"error": "請提供月份，格式 YYYY-MM"}), 400
@@ -256,9 +298,15 @@ def get_store_flavor_sales():
     for store in store_names:
         counts, labels = _sum_store_flavor_counts_in_month(store, y, m)
         pie = []
+
         for fid, qty in counts.items():
+            # 嘗試用 labels 對應中文名稱；找不到就回傳 id
             name = labels.get(fid, fid)
-            pie.append({"name": name, "value": int(qty)})
+            pie.append({
+                "name": name,
+                "value": int(qty)
+            })
+
         result[store] = pie
 
     return jsonify(result), 200
