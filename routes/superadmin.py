@@ -642,7 +642,8 @@ def transfer_ingredient():
             "unit": unit,
             "operator": user.get("uid"),
             "operator_name": user.get("name", "Superadmin"),
-            "created_at": firestore.SERVER_TIMESTAMP
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "status": "success"
         })
 
     try:
