@@ -592,6 +592,102 @@ def update_order(order_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ----------------------------------------------------
+# Running Total：把完成訂單即時累加到 daily_summary/summary
+# ----------------------------------------------------
+def _apply_order_to_running_total(store_name: str, ymd: str, completed_doc_id: str, order_data: dict):
+    """
+    將一筆 completed order 累加到 `stores/{store}/dates/{ymd}/daily_summary/summary`
+    - 使用 Transaction + Increment 原子更新
+    - 以 daily_summary_applied/{completed_doc_id} 作為防重旗標（冪等）
+    欄位：revenue, orders_count, items_count, flavor_counts.<mid>, flavor_revenue.<mid>, flavor_labels.<mid>
+    """
+    summary_ref = (db.collection("stores").document(store_name)
+                     .collection("dates").document(ymd)
+                     .collection("daily_summary").document("summary"))
+    applied_flag_ref = (db.collection("stores").document(store_name)
+                          .collection("dates").document(ymd)
+                          .collection("daily_summary_applied").document(completed_doc_id))
+
+    items = order_data.get("items", []) or []
+
+    # 計算本單合計
+    total_qty = 0
+    total_price = 0
+    flavor_increments = []  # (mid, mname, qty, sub)
+
+    # 允許使用 order 層級 total_price；沒有就由 items 小計
+    if isinstance(order_data.get("total_price"), (int, float)):
+        total_price = int(order_data["total_price"])
+
+    for it in items:
+        mid = str(it.get("menu_id", "")).strip()
+        mname = it.get("menu_name") or mid
+        qty = 0
+        sub = 0
+        try:
+            qty = int(it.get("quantity", 0))
+        except Exception:
+            pass
+        try:
+            sub = int(it.get("subtotal", it.get("total", 0) or 0))
+        except Exception:
+            try:
+                sub = int(float(it.get("subtotal", it.get("total", 0) or 0)))
+            except Exception:
+                sub = 0
+
+        total_qty += max(qty, 0)
+        if not isinstance(order_data.get("total_price"), (int, float)):
+            total_price += max(sub, 0)
+
+        if mid:
+            flavor_increments.append((mid, mname, max(qty, 0), max(sub, 0)))
+
+    @firestore.transactional
+    def _txn(transaction: firestore.Transaction):
+        # 防重：已套用則跳過
+        applied_snap = applied_flag_ref.get(transaction=transaction)
+        if applied_snap.exists:
+            return "already_applied"
+
+        # 確保 summary 基礎欄位存在
+        base = {
+            "store": store_name,
+            "date": f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}",
+            "monthKey": ymd[:6],
+        }
+        transaction.set(summary_ref, base, merge=True)
+
+        # 準備更新
+        updates = {
+            "revenue": Increment(int(total_price)),
+            "orders_count": Increment(1),
+            "items_count": Increment(int(total_qty)),
+            "last_updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        for mid, mname, qty, sub in flavor_increments:
+            updates[f"flavor_counts.{mid}"] = Increment(int(qty))
+            updates[f"flavor_revenue.{mid}"] = Increment(int(sub))
+            updates[f"flavor_labels.{mid}"] = mname  # 覆寫同值冪等
+
+        transaction.update(summary_ref, updates)
+
+        # 打防重旗標
+        transaction.set(applied_flag_ref, {
+            "order_id": completed_doc_id,
+            "applied_at": firestore.SERVER_TIMESTAMP,
+        }, merge=False)
+
+        return "applied"
+
+    tx = db.transaction()
+    return _txn(tx)
+
+
+# =========================
+# 完成單筆訂單並扣庫存（含 running total）
+# =========================
 @orders_bp.route("/complete_order/<order_id>", methods=["POST"])
 @token_required
 def complete_order(order_id):
@@ -626,6 +722,9 @@ def complete_order(order_id):
                         .collection("completed_orders").document(doc_id))
         dates_ref.set(order_data)
 
+        # ---- Running total：即時累加到當天 summary（冪等、防重）----
+        _apply_order_to_running_total(store_name, ymd, doc_id, order_data)
+
         # 3. Running Total：即時累加到當天 summary
         _apply_order_to_running_total(store_name, ymd, doc_id, order_data)
 
@@ -641,6 +740,9 @@ def complete_order(order_id):
         return jsonify({"error": str(e)}), 500
 
 
+# =========================
+# 批次完成多筆並扣庫存（含 running total）
+# =========================
 @orders_bp.route("/complete_multiple_orders", methods=["POST"])
 @token_required
 def complete_multiple_orders():
@@ -684,6 +786,9 @@ def complete_multiple_orders():
                             .collection("dates").document(ymd)
                             .collection("completed_orders").document(doc_id))
             dates_ref.set(order_data)
+
+            # ---- Running total：即時累加到當天 summary（冪等、防重）----
+            _apply_order_to_running_total(store_name, ymd, doc_id, order_data)
 
             # 3. Running Total
             _apply_order_to_running_total(store_name, ymd, doc_id, order_data)
