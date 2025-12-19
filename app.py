@@ -22,28 +22,28 @@ from routes.superadmin import superadmin_bp
 
 app = Flask(__name__)
 
-# ===== CORS 設定（用環境變數 ALLOWED_ORIGINS 控制）=====
-# 例：ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,http://192.168.100.7:3000,https://你的前端站.onrender.com"
+# ===== CORS 設定（只允許「來源」：scheme + host + port）=====
+# 例：ALLOWED_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,https://yaoyao-admin.web.app"
 _default_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://192.168.100.7:3000",
-    " http://163.13.14.137:3000",   # 後端自己（可留可去，無妨）
-    " http://163.13.54.132:3000 ",
-    "http://192.168.100.6:3000 ",
+    "http://163.13.14.137:3000",
+    "http://163.13.54.132:3000",
+    "http://192.168.100.6:3000",
     "http://163.13.48.116:3000",
     "https://yaoyaoproject-88907.web.app",
     "https://yaoyao-admin.web.app",
     "https://yaoyao-customer.web.app",
-    
 ]
+
 _allowed = os.getenv("ALLOWED_ORIGINS", ",".join(_default_origins))
 ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
 
 CORS(
     app,
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
     supports_credentials=True,
-    origins=ALLOWED_ORIGINS,
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )

@@ -3,21 +3,23 @@ from flask import Blueprint, request, jsonify
 from routes.auth import token_required
 
 # --- 天氣改用 REST 版 ---
-# 若你的專案是放在 tool/ 資料夾，保持這行即可；若不在 tool/，可改成 from weather_from_rest import ...
 try:
     from tool.weather_from_rest import fetch_weather_from_rest
 except Exception:
     from weather_from_rest import fetch_weather_from_rest  # 後備匯入路徑
 
 from tool.lstm_predict_all import forecast_next_sales, load_models_and_data
-from tool.firebase_fetcher import fetch_ingredient_inventory, fetch_recipes
+from tool.firebase_fetcher import fetch_recipes
 from tool.ingredient_demand import calculate_total_demand
+
+from firebase_config import db
 
 import os
 import requests
 import traceback
 from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional, Tuple
+
 
 inventory_bp = Blueprint("inventory", __name__)
 
@@ -35,7 +37,7 @@ def geocode_address(address: str) -> Tuple[float, float]:
             g_url = "https://maps.googleapis.com/maps/api/geocode/json"
             params = {
                 "address": address,
-                "region": "tw",       # 優先台灣結果
+                "region": "tw",
                 "language": "zh-TW",
                 "key": api_key,
             }
@@ -131,18 +133,16 @@ def earliest_expiry_info(inv_entry: Any) -> Tuple[Optional[date], Optional[int]]
     """
     inv_entry 可能是：
       - dict：{"quantity": 100, "unit": "克", "expiration_date": "2025-07-21"}（✅ 單層）
-      - list：多批次 [{"quantity": 50, "unit": "...", "保存期限": "..."}, ...]
+      - list：多批次 [{"quantity": 50, "unit": "...", "expiration_date": "..."}, ...]
     回傳：(最早日期, 與今天相差天數)
     """
     today = taipei_today()
 
     DATE_KEYS: Tuple[str, ...] = (
-        # 英文常見
         "expiration_date", "expiry_date", "expire_date", "expire_on",
         "best_before", "best_before_date", "valid_until", "date",
         "expiration", "expirationDate", "validUntil", "exp", "expiry",
         "shelf_life",
-        # 中文常見
         "保存期限", "到期日", "效期", "效期日", "效期至", "保存期限日", "保質期",
     )
 
@@ -154,13 +154,11 @@ def earliest_expiry_info(inv_entry: Any) -> Tuple[Optional[date], Optional[int]]
                     return dt
         return None
 
-    # ✅ 直接是單層 dict（你的現況）
     if isinstance(inv_entry, dict):
         dt = pick_date_from_dict(inv_entry)
         if dt:
             return dt, (dt - today).days
 
-    # 多批次 list
     if isinstance(inv_entry, list):
         dates: List[date] = []
         for batch in inv_entry:
@@ -173,6 +171,75 @@ def earliest_expiry_info(inv_entry: Any) -> Tuple[Optional[date], Optional[int]]
             return earliest, (earliest - today).days
 
     return None, None
+
+
+# -------------------------------
+# ✅ Firestore 直接抓批次總庫存（in_use + unused）
+# -------------------------------
+def fetch_ingredient_inventory_batches(store_name: str) -> Dict[str, Dict[str, Any]]:
+    """
+    回傳格式維持『單層 dict』，讓後面的程式不用大改：
+      inventory["SUGAR"] = {"quantity": 120, "unit": "克", "expiration_date": "2025-12-31"}
+
+    計算規則（你要的簡單版）：
+      - 可用庫存 = sum(batches where status in ["in_use","unused"])
+      - 最早效期 = 在上述可用批次中，挑最早的 expiration_date
+      - 如果某食材沒有 batches（舊資料），fallback 用父文件 quantity/expiration_date
+    """
+    inv: Dict[str, Dict[str, Any]] = {}
+
+    ingredients = (
+        db.collection("stores")
+          .document(store_name)
+          .collection("ingredients")
+          .stream()
+    )
+
+    for ing_doc in ingredients:
+        ing = ing_doc.to_dict() or {}
+        name = (ing.get("name") or "").strip()
+        if not name:
+            continue
+
+        key = name.upper()
+        unit = ing.get("unit")
+
+        # 1) 優先看 batches（新結構）
+        batches_col = ing_doc.reference.collection("batches")
+
+        total = 0.0
+        earliest: Optional[date] = None
+        has_any_batch = False
+
+        try:
+            # Firestore 沒有 in() 在所有 SDK 都一致保證，這裡用兩次查詢最穩
+            for st in ("in_use", "unused"):
+                for b in batches_col.where("status", "==", st).stream():
+                    has_any_batch = True
+                    bd = b.to_dict() or {}
+                    qty = float(bd.get("quantity", 0) or 0)
+                    if qty > 0:
+                        total += qty
+
+                    exp = parse_to_date(bd.get("expiration_date"))
+                    if exp:
+                        earliest = exp if (earliest is None or exp < earliest) else earliest
+        except Exception:
+            # 批次讀取失敗：退回父文件
+            has_any_batch = False
+
+        # 2) 若沒有任何 batch，就 fallback 父文件（支援舊資料）
+        if not has_any_batch:
+            total = float(ing.get("quantity", 0) or 0)
+            earliest = parse_to_date(ing.get("expiration_date"))
+
+        payload: Dict[str, Any] = {"quantity": float(total), "unit": unit}
+        if earliest:
+            payload["expiration_date"] = earliest.isoformat()
+
+        inv[key] = payload
+
+    return inv
 
 
 # -------------------------------
@@ -193,7 +260,7 @@ def check_inventory():
         # 1) GPS
         lat, lon = geocode_address(address)
 
-        # 2) 天氣（給需求預測用）— 改用 REST 版
+        # 2) 天氣（給需求預測用）
         forecast_data = fetch_weather_from_rest(lat, lon)
         if not forecast_data:
             return jsonify({"error": "氣象資料取得失敗"}), 400
@@ -210,8 +277,8 @@ def check_inventory():
                 y_pred = forecast_next_sales(flavor, pivot_df, model, scaler, forecast_data)
                 predicted_sales[flavor] = float(sum(y_pred))
 
-        # 5) 取庫存/食譜 + 計算需求
-        inventory = fetch_ingredient_inventory(store_name)
+        # 5) ✅ 取庫存/食譜 + 計算需求（庫存改成 batches 總量）
+        inventory = fetch_ingredient_inventory_batches(store_name)
         recipes = fetch_recipes()
         demand = calculate_total_demand(predicted_sales, recipes)
 
@@ -231,6 +298,7 @@ def check_inventory():
                 available = float(inv_entry.get("quantity", 0))
                 available_unit = inv_entry.get("unit", unit)
             else:
+                # 這邊通常不會再遇到 list（因為我們回傳單層），保留兼容
                 available = 0.0
                 available_unit = unit
                 if isinstance(inv_entry, list):
@@ -268,21 +336,13 @@ def check_inventory():
 
             shortage_report[name] = entry
 
-        # 需求沒用到但庫存有的
+        # 需求沒用到但庫存有的（也要顯示＋檢查效期）
         for name, inv_entry in inventory.items():
             if name in shortage_report:
                 continue
-            available = 0.0
-            unit = None
-            if isinstance(inv_entry, dict) and "quantity" in inv_entry:
-                available = float(inv_entry.get("quantity", 0))
-                unit = inv_entry.get("unit")
-            elif isinstance(inv_entry, list):
-                for batch in inv_entry:
-                    if isinstance(batch, dict):
-                        available += float(batch.get("quantity", 0))
-                        if unit is None and "unit" in batch:
-                            unit = batch["unit"]
+
+            available = float(inv_entry.get("quantity", 0) or 0) if isinstance(inv_entry, dict) else 0.0
+            unit = inv_entry.get("unit") if isinstance(inv_entry, dict) else None
 
             entry = {"status": "未使用", "required": 0.0, "available": available, "unit": unit}
             expire_on, days_left = earliest_expiry_info(inv_entry)
@@ -298,6 +358,7 @@ def check_inventory():
                         "available": available,
                         "unit": unit,
                     })
+
             shortage_report[name] = entry
 
         return jsonify({

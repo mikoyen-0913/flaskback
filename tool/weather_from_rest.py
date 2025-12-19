@@ -5,7 +5,8 @@ import certifi
 import urllib3
 from typing import List, Dict, Optional
 
-CWA_API_KEY = os.getenv("CWA_API_KEY")
+CWA_API_KEY = "CWA-6FAB80A3-75EF-4555-86C3-A026F8F0E564"
+#os.getenv("CWA_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 ALLOW_INSECURE = os.getenv("ALLOW_INSECURE_WEATHER", "0") == "1"
 CA_PATH = os.getenv("SSL_CERT_FILE") or certifi.where()

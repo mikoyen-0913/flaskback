@@ -1,7 +1,8 @@
 # tool/firebase_fetcher.py
 import firebase_admin
 from firebase_admin import credentials, firestore
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, Tuple, Optional
+from datetime import datetime, date, timezone
 
 db = None
 
@@ -11,7 +12,6 @@ def init_firebase():
 
     # 已初始化就跳過
     if db is not None:
-        print("⚠️ Firebase 已初始化，直接使用")
         return
 
     try:
@@ -40,16 +40,6 @@ DATE_KEYS: Tuple[str, ...] = (
     "保存期限", "到期日", "效期", "效期日", "效期至", "保存期限日", "保質期",
 )
 
-
-def _pick_dates(d: Dict[str, Any]) -> Dict[str, Any]:
-    """從 dict 擷取所有存在的效期欄位（不轉型，原樣帶出）。"""
-    out: Dict[str, Any] = {}
-    for k in DATE_KEYS:
-        if k in d and d[k] not in (None, ""):
-            out[k] = d[k]
-    return out
-
-
 def _to_float(x: Any, default: float = 0.0) -> float:
     try:
         if x is None:
@@ -60,89 +50,142 @@ def _to_float(x: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+def _parse_to_date(raw: Any) -> Optional[date]:
+    """相容 datetime/date/字串/epoch/Firestore Timestamp(dict)."""
+    if raw is None:
+        return None
 
-# ====== 根據店別名稱讀取該店食材庫存（含效期與批次） ======
-def fetch_ingredient_inventory(store_name: str) -> Dict[str, Any]:
+    if isinstance(raw, date) and not isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, datetime):
+        return raw.date()
+
+    if isinstance(raw, dict):
+        sec = raw.get("_seconds") or raw.get("seconds")
+        if sec is not None:
+            if sec > 1e12:
+                sec = sec / 1000.0
+            return datetime.fromtimestamp(float(sec), tz=timezone.utc).date()
+        if "value" in raw:
+            return _parse_to_date(raw["value"])
+
+    if isinstance(raw, (int, float)):
+        sec = raw if raw <= 1e12 else raw / 1000.0
+        return datetime.fromtimestamp(float(sec), tz=timezone.utc).date()
+
+    if isinstance(raw, str):
+        s = raw.strip().replace("/", "-")
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(s).date()
+            except Exception:
+                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    return None
+
+def _pick_any_expiration(d: Dict[str, Any]) -> Optional[date]:
+    """從父文件抓任意可解析的效期欄位（中英都支援）。"""
+    for k in DATE_KEYS:
+        if k in d and d[k] not in (None, ""):
+            dt = _parse_to_date(d[k])
+            if dt:
+                return dt
+    return None
+
+
+# ==========================================================
+# ✅ 讀取店內庫存（批次總量版）
+# ==========================================================
+def fetch_ingredient_inventory(store_name: str) -> Dict[str, Dict[str, Any]]:
     """
-    回傳格式（兩種情形擇一，取決於你 Firestore 的資料型態）：
-    1) 單層文件（無 batches 子集合）
-       {
-         "泡打粉": { "quantity": 515.92, "unit": "克", "expiration_date": "2025-07-21" },
-         "牛奶":   { "quantity": 25583.8, "unit": "毫升", "到期日": "2025-09-06" },
-         ...
-       }
+    ✅ 固定回傳『單層 dict』，每個食材一筆：
 
-    2) 有批次的文件（有 batches 子集合）
-       {
-         "牛奶": [
-           {"quantity": 1000, "unit": "毫升", "expiration_date": "2025-09-04"},
-           {"quantity":  800, "unit": "毫升", "expiration_date": "2025-09-06"}
-         ],
-         ...
-       }
+    {
+      "牛奶": {"quantity": 1800, "unit": "毫升", "expiration_date": "2025-09-04"},
+      "泡打粉": {"quantity": 515.92, "unit": "克", "expiration_date": "2025-07-21"},
+      ...
+    }
+
+    計算規則（你現在的批次庫存設計）：
+    - 可用庫存 = sum(batches where status in ["in_use", "unused"])
+      （忽略 depleted）
+    - expiration_date = 在上述可用批次中，挑最早的 expiration_date（若有）
+    - 若某食材沒有 batches（舊資料），fallback 用父文件 quantity/expiration_date
+    - key：一律用『食材名稱大寫』，方便跟食譜需求對齊
     """
     init_firebase()
     if db is None:
         raise RuntimeError("❌ Firestore 客戶端尚未初始化")
 
     ingredients_ref = db.collection("stores").document(store_name).collection("ingredients")
-    inventory: Dict[str, Any] = {}
+    inventory: Dict[str, Dict[str, Any]] = {}
 
     for doc in ingredients_ref.stream():
         data = doc.to_dict() or {}
-        # 名稱優先使用欄位 name，否則用 document id
-        name = (data.get("name") or doc.id).strip().upper()
+
+        name = (data.get("name") or doc.id or "").strip()
         if not name:
-            continue  # 防止空白名稱
-
-        # 先嘗試讀取子集合 batches（若存在則使用批次模式）
-        batches_ref = ingredients_ref.document(doc.id).collection("batches")
-        try:
-            batch_docs = list(batches_ref.stream())
-        except Exception:
-            batch_docs = []
-
-        if batch_docs:
-            batch_list: List[Dict[str, Any]] = []
-            for b in batch_docs:
-                bd = b.to_dict() or {}
-                item: Dict[str, Any] = {
-                    "quantity": _to_float(bd.get("quantity"), 0.0),
-                }
-                if "unit" in bd:
-                    item["unit"] = bd["unit"]
-                # 帶出所有可能的日期欄位
-                item.update(_pick_dates(bd))
-                batch_list.append(item)
-
-            inventory[name] = batch_list
             continue
 
-        # 沒有批次就使用單層文件
-        entry: Dict[str, Any] = {
-            "quantity": _to_float(data.get("quantity"), 0.0),
-            "unit": data.get("unit", ""),
-        }
-        entry.update(_pick_dates(data))
-        inventory[name] = entry
+        key = name.upper()
+        unit = data.get("unit", "")
 
-    # 方便除錯（可暫時打開）
-    # print("[fetch_ingredient_inventory] sample:", list(inventory.items())[:3])
+        batches_ref = ingredients_ref.document(doc.id).collection("batches")
+
+        total = 0.0
+        earliest: Optional[date] = None
+        has_any_batch = False
+
+        try:
+            # 用兩次 where 最穩（避免 in() 在不同環境的兼容問題）
+            for st in ("in_use", "unused"):
+                for b in batches_ref.where("status", "==", st).stream():
+                    has_any_batch = True
+                    bd = b.to_dict() or {}
+                    qty = _to_float(bd.get("quantity"), 0.0)
+                    if qty > 0:
+                        total += qty
+
+                    exp = _parse_to_date(bd.get("expiration_date"))
+                    if exp:
+                        earliest = exp if (earliest is None or exp < earliest) else earliest
+        except Exception:
+            # 批次讀取失敗：退回父文件
+            has_any_batch = False
+
+        if not has_any_batch:
+            total = _to_float(data.get("quantity"), 0.0)
+            exp_parent = _pick_any_expiration(data)
+            earliest = exp_parent if exp_parent else None
+
+        entry: Dict[str, Any] = {
+            "quantity": float(total),
+            "unit": unit,
+        }
+        if earliest:
+            entry["expiration_date"] = earliest.isoformat()
+
+        inventory[key] = entry
+
     return inventory
 
 
-# ====== 讀取食譜資料 ======
+# ==========================================================
+# 讀取食譜資料
+# ==========================================================
 def fetch_recipes() -> Dict[str, Dict[str, Tuple[float, str]]]:
     """
     回傳：
-    {
-      "珍珠鮮奶油": {
-        "雞蛋": (100, "克"),
-        "牛奶": (200, "毫升"),
+      {
+        "奶油紅豆餅": {"糖": (10, "克"), "牛奶": (20, "毫升")},
         ...
-      },
-      ...
-    }
+      }
     """
     init_firebase()
     if db is None:
@@ -152,24 +195,18 @@ def fetch_recipes() -> Dict[str, Dict[str, Tuple[float, str]]]:
     recipes: Dict[str, Dict[str, Tuple[float, str]]] = {}
 
     for doc in recipes_ref.stream():
-        data = doc.to_dict() or {}
         flavor_name = doc.id
+        data = doc.to_dict() or {}
+
         recipes[flavor_name] = {}
 
-        # 允許兩種結構：
-        # A) { "雞蛋": {"amount": 100, "unit": "克"}, "牛奶": {"amount": 200, "unit": "毫升"} }
-        # B) { "ingredients": { "雞蛋": {"amount": 100, "unit": "克"}, ... } }
-        ingredients_obj = data.get("ingredients") if isinstance(data.get("ingredients"), dict) else data
-
-        for ingredient, detail in (ingredients_obj or {}).items():
-            # detail 可能是 dict，也可能直接是數字
+        for ingredient, detail in data.items():
             amount = None
             unit = None
             if isinstance(detail, dict):
                 amount = _to_float(detail.get("amount"))
                 unit = detail.get("unit")
             else:
-                # 若是直接數值，則需要有個預設單位（這裡若沒有就略過）
                 amount = _to_float(detail)
                 unit = None
 

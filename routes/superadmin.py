@@ -10,6 +10,7 @@ from google.cloud import firestore
 import json
 from google.cloud.firestore_v1 import FieldFilter
 import os
+import types # 用於檢查 generator 類型
 
 superadmin_bp = Blueprint("superadmin", __name__)
 
@@ -127,6 +128,61 @@ MENU_ID_TO_NAME = {
     "sNk2RNReyIZz58vifCm": "紅豆麻糬",
 }
 
+# ====== 批次庫存統計用：日期/數字工具 ======
+def _to_float(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, (int, float)):
+            return float(x)
+        return float(str(x).strip())
+    except Exception:
+        return default
+
+def _parse_date(val):
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.strptime(val[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+    if isinstance(val, dict):
+        sec = val.get("_seconds") or val.get("seconds")
+        if sec:
+            return datetime.utcfromtimestamp(sec).date()
+    return None
+
+def _sum_available_and_earliest_exp(ing_ref, parent_data: dict):
+    """
+    回傳 (total_available, earliest_exp_date)
+    total_available = sum(batches.status in ['in_use','unused'])
+    earliest_exp_date = 上述可用批次中最早 expiration_date
+    若沒有 batches（舊資料），fallback parent quantity/expiration_date
+    """
+    total = 0.0
+    earliest = None
+
+    try:
+        batches_col = ing_ref.collection("batches")
+        for st in ("in_use", "unused"):
+            for b in batches_col.where("status", "==", st).stream():
+                bd = b.to_dict() or {}
+                q = _to_float(bd.get("quantity"), 0.0)
+                if q > 0:
+                    total += q
+                exp = _parse_date(bd.get("expiration_date"))
+                if exp:
+                    earliest = exp if (earliest is None or exp < earliest) else earliest
+        return total, earliest
+    except Exception:
+        # fallback：若 batches 讀不到，退回父文件
+        q = _to_float(parent_data.get("quantity"), 0.0)
+        exp = _parse_date(parent_data.get("expiration_date"))
+        return q, exp
+
 # ------------- 地圖：地址轉經緯度 -------------
 
 def geocode_address(address):
@@ -179,6 +235,7 @@ def geocode_address(address):
         print(f"[geocode_address][OSM] 失敗：{address} => {e}")
 
     return None, None
+
 # ------------- API 區 -------------
 
 @superadmin_bp.route("/get_all_store_revenue", methods=["GET"])
@@ -187,9 +244,6 @@ def get_all_store_revenue():
     """
     各分店營收折線圖
     range: 7days / month / year
-    - 7days：回傳最近 7 天每天營收
-    - month：?month=YYYY-MM，回傳當月每天營收
-    - year：?year=YYYY，回傳每月總營收
     """
     user = request.user
     if user.get("role") != "superadmin":
@@ -220,7 +274,6 @@ def get_all_store_revenue():
             return jsonify({"error": "月份格式錯誤，需為 YYYY-MM"}), 400
 
         start_dt, end_dt = _month_range(y, m)
-        # 若查詢當月，顯示到今天；否則顯示到月底
         end_for_label = min(end_dt, today + timedelta(days=1)) if (y == today.year and m == today.month) else end_dt
         labels = []
         d = start_dt
@@ -239,17 +292,12 @@ def get_all_store_revenue():
 
     elif range_type == "year":
         y = int(request.args.get("year", today.year))
-
-        # 固定 12 個月份鍵與對應的標籤
-        ym_keys = _ym_keys_for_year(y)                    # ["202501", …, "202512"]
-        labels = [f"{int(ym[4:6])}月" for ym in ym_keys]  # ["1月", …, "12月"]
+        ym_keys = _ym_keys_for_year(y)
+        labels = [f"{int(ym[4:6])}月" for ym in ym_keys]
 
         for store in store_names:
-            # 批次抓該店 12 個 monthly_summary
             refs = [_monthly_doc_ref(store, ym) for ym in ym_keys]
             docs = db.get_all(refs)
-
-            # 建 monthly -> revenue 對照，有文件就讀值，沒有就缺席（之後補 0）
             month_to_rev = {}
             for doc in docs:
                 parts = doc.reference.path.split("/")
@@ -260,11 +308,8 @@ def get_all_store_revenue():
                     data = doc.to_dict() or {}
                     rev = float(data.get("total_revenue", data.get("revenue", 0)) or 0)
                     month_to_rev[yyyymm] = round(rev, 2)
-
-            # 依固定 12 個月份輸出，缺的就填 0
             revenues = [month_to_rev.get(ym, 0) for ym in ym_keys]
             result.append({"store_name": store, "dates": labels, "revenues": revenues})
-
     else:
         return jsonify({"error": "range 參數錯誤，允許值：7days / month / year"}), 400
 
@@ -273,16 +318,10 @@ def get_all_store_revenue():
 @superadmin_bp.route("/get_store_flavor_sales", methods=["GET"])
 @token_required
 def get_store_flavor_sales():
-    """
-    圓餅圖口味統計（每家店各自回傳）
-    參數：month=YYYY-MM
-    回傳：{ store_name: [{name, value}, ...], ... }
-    """
     user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
 
-    # 解析參數 month
     month_str = request.args.get("month")
     if not month_str:
         return jsonify({"error": "請提供月份，格式 YYYY-MM"}), 400
@@ -298,15 +337,9 @@ def get_store_flavor_sales():
     for store in store_names:
         counts, labels = _sum_store_flavor_counts_in_month(store, y, m)
         pie = []
-
         for fid, qty in counts.items():
-            # 嘗試用 labels 對應中文名稱；找不到就回傳 id
             name = labels.get(fid, fid)
-            pie.append({
-                "name": name,
-                "value": int(qty)
-            })
-
+            pie.append({"name": name, "value": int(qty)})
         result[store] = pie
 
     return jsonify(result), 200
@@ -314,9 +347,6 @@ def get_store_flavor_sales():
 @superadmin_bp.route("/get_summary_this_month", methods=["GET"])
 @token_required
 def get_summary_this_month():
-    """
-    本月總銷售額與訂單數（彙總所有可管理的分店）
-    """
     user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
@@ -336,10 +366,6 @@ def get_summary_this_month():
 @superadmin_bp.route("/get_top_flavors", methods=["GET"])
 @token_required
 def get_top_flavors():
-    """
-    銷售排行榜（跨所有分店的口味總量 Top 10）
-    參數：month=YYYY-MM
-    """
     user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
@@ -381,27 +407,43 @@ def get_my_stores():
 def get_inventory_by_store():
     user = request.user
     if user.get("role") != "superadmin":
-        return jsonify({"error": "僅限企業主使用"}), 403
+        return jsonify({"error": "permission denied"}), 403
 
-    store_name = request.args.get("store")
-    if not store_name:
-        return jsonify({"error": "請提供 store 參數"}), 400
+    store = request.args.get("store")
+    if not store:
+        return jsonify({"error": "store required"}), 400
 
-    try:
-        ingredients_ref = db.collection("stores").document(store_name).collection("ingredients")
-        snapshot = ingredients_ref.stream()
-        inventory = [{"id": doc.id, **(doc.to_dict() or {})} for doc in snapshot]
-        return jsonify({"store": store_name, "inventory": inventory}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    result = []
+    ing_col = db.collection("stores").document(store).collection("ingredients")
+
+    for doc in ing_col.stream():
+        data = doc.to_dict() or {}
+        ing_ref = doc.reference
+        total = 0.0
+        earliest = None
+        try:
+            batches = ing_ref.collection("batches")
+            for st in ("in_use", "unused"):
+                for b in batches.where("status", "==", st).stream():
+                    bd = b.to_dict() or {}
+                    qty = _to_float(bd.get("quantity"))
+                    total += qty
+                    exp = _parse_date(bd.get("expiration_date"))
+                    if exp:
+                        earliest = exp if earliest is None or exp < earliest else earliest
+        except Exception:
+            total = _to_float(data.get("quantity"))
+            earliest = _parse_date(data.get("expiration_date"))
+
+        data["quantity"] = int(round(total))
+        data["expiration_date"] = earliest.isoformat() if earliest else None
+        result.append({"id": doc.id, **data})
+
+    return jsonify({"store": store, "inventory": result}), 200
 
 @superadmin_bp.route("/get_store_revenue_rank", methods=["GET"])
 @token_required
 def get_store_revenue_rank():
-    """
-    分店營收排行榜（指定月份）
-    參數：month=YYYY-MM
-    """
     user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
@@ -429,13 +471,6 @@ def get_store_revenue_rank():
 @superadmin_bp.route("/get_store_locations", methods=["GET"])
 @token_required
 def get_store_locations():
-    """
-    superadmin 取得所有分店的地址、經緯度與（指定期間）營收總額
-    參數：
-      range = 7days / month / year（預設 month）
-      month = YYYY-MM（當 range=month 時可傳，預設當月）
-      year  = YYYY（當 range=year 時可傳，預設今年）
-    """
     user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
@@ -463,29 +498,23 @@ def get_store_locations():
     else:
         return jsonify({"error": "range 參數錯誤，允許值：7days / month / year"}), 400
 
-    # 掃 users，挑出分店帳號（developer / staff）
     users_ref = db.collection("users")
     docs = users_ref.stream()
-
     store_list = []
     for doc in docs:
         data = doc.to_dict() or {}
         role = data.get("role", "")
         if role not in ["developer", "staff"]:
             continue
-
         store_name = data.get("store_name", "")
         address = data.get("address", "")
-
         revenue = 0
         if store_name:
             try:
                 revenue = _sum_store_revenue_between(store_name, start_dt, end_dt)
             except Exception as e:
                 print(f"[get_store_locations] 營收查詢失敗 {store_name}: {e}")
-
         lat, lon = geocode_address(address)
-
         store_list.append({
             "store_name": store_name,
             "address": address,
@@ -495,8 +524,6 @@ def get_store_locations():
         })
 
     return jsonify(store_list), 200
-
-# ===== 調貨：CORS 預檢（/superadmin/transfer 用） =====
 
 @superadmin_bp.route("/superadmin/transfer", methods=["OPTIONS"])
 def superadmin_transfer_preflight():
@@ -509,111 +536,126 @@ def superadmin_transfer_preflight():
     resp.headers["Access-Control-Allow-Credentials"] = "true"
     return resp
 
-# ===== 調貨：實作庫存轉移 & 紀錄 =====
-
+# ===== ✅ 調貨：批次庫存版（修復 Generator 錯誤 + Transaction 寫入） =====
 @superadmin_bp.route("/superadmin/transfer_ingredient", methods=["POST"])
 @token_required
 def transfer_ingredient():
-    user = request.user or {}
+    user = request.user
     if user.get("role") != "superadmin":
-        return jsonify({"error": "你不是企業主"}), 403
+        return jsonify({"error": "permission denied"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json() or {}
 
     from_store = data.get("from_store")
-    to_store   = data.get("to_store")
-    qty        = data.get("quantity")
-    unit       = data.get("unit")
-    # 對應參數（任選其一組）
-    from_ing_id = data.get("from_ingredient_id") or data.get("ingredient_id")
-    to_ing_id   = data.get("to_ingredient_id")
-    ing_name    = data.get("ingredient_name")
+    to_store = data.get("to_store")
+    qty = _to_float(data.get("quantity"))
+    unit = data.get("unit")
+    ing_name = data.get("ingredient_name")
+    from_ing_id = data.get("from_ingredient_id")
+    to_ing_id = data.get("to_ingredient_id")
 
-    # --- 基本驗證 ---
-    if not from_store or not to_store:
-        return jsonify({"error": "from_store / to_store 必填"}), 400
-    try:
-        qty = float(qty)
-        if qty <= 0:
-            raise ValueError()
-    except Exception:
-        return jsonify({"error": "quantity 必須是正數"}), 400
-    if not unit:
-        return jsonify({"error": "unit 必填"}), 400
+    if qty <= 0:
+        return jsonify({"error": "quantity must be positive"}), 400
 
-    # --- 取得兩邊的 doc ref（支援 id 或 name 對應） ---
     from_ref = _get_ing_doc_ref(from_store, from_ing_id, ing_name)
-    to_ref   = _get_ing_doc_ref(to_store,   to_ing_id,   ing_name)
+    to_ref = _get_ing_doc_ref(to_store, to_ing_id, ing_name)
 
-    if not from_ref:
-        return jsonify({"error": f"來源店找不到對應食材文件（store={from_store}, id={from_ing_id}, name={ing_name}）"}), 404
-    if not to_ref:
-        return jsonify({"error": f"目的店找不到對應食材文件（store={to_store}, id={to_ing_id}, name={ing_name}）"}), 404
+    if not from_ref or not to_ref:
+        return jsonify({"error": "ingredient not found"}), 404
 
-    # --- Firestore 交易：原子讀寫與驗證 ---
     transaction = db.transaction()
 
     @firestore.transactional
-    def _tx(transaction, from_ref, to_ref, qty, unit):
-        from_snap = from_ref.get(transaction=transaction)
-        to_snap   = to_ref.get(transaction=transaction)
+    def _tx(tx):
+        # [FIX] 安全讀取：若 tx.get() 返回 generator，則用 next() 取出 snapshot
+        from_obj = tx.get(from_ref)
+        if isinstance(from_obj, types.GeneratorType):
+            from_snap = next(from_obj)
+        else:
+            from_snap = from_obj
 
-        if not from_snap.exists:
-            raise ValueError("來源店食材不存在")
-        if not to_snap.exists:
-            raise ValueError("目的店食材不存在")
+        to_obj = tx.get(to_ref)
+        if isinstance(to_obj, types.GeneratorType):
+            to_snap = next(to_obj)
+        else:
+            to_snap = to_obj
 
-        from_data = from_snap.to_dict() or {}
-        to_data   = to_snap.to_dict() or {}
+        if not from_snap.exists or not to_snap.exists:
+            raise ValueError("ingredient missing")
 
-        # 單位一致性檢查
-        from_unit = (from_data.get("unit") or "").strip().lower()
-        to_unit   = (to_data.get("unit") or "").strip().lower()
-        req_unit  = (unit or "").strip().lower()
-        if from_unit != req_unit or to_unit != req_unit:
-            raise ValueError(f"單位不一致：from={from_data.get('unit')}, to={to_data.get('unit')}, req={unit}")
+        to_data = to_snap.to_dict()
 
-        from_qty = float(from_data.get("quantity", 0))
-        to_qty   = float(to_data.get("quantity", 0))
-        if from_qty < qty:
-            raise ValueError(f"庫存不足：來源可用 {from_qty} < 轉出 {qty}")
+        # 找來源 in_use 批次
+        inuse_docs = list(
+            from_ref.collection("batches")
+            .where("status", "==", "in_use")
+            .limit(1)
+            .stream(transaction=tx)
+        )
+        if not inuse_docs:
+            raise ValueError("no in_use batch")
 
-        transaction.update(from_ref, {"quantity": from_qty - qty})
-        transaction.update(to_ref,   {"quantity": to_qty + qty})
+        b = inuse_docs[0]
+        bd = b.to_dict()
+        cur_qty = _to_float(bd.get("quantity"))
+
+        if cur_qty < qty:
+            raise ValueError("not enough stock")
+
+        new_qty = cur_qty - qty
+
+        # 更新來源
+        tx.update(b.reference, {
+            "quantity": new_qty,
+            "status": "depleted" if new_qty == 0 else "in_use"
+        })
+
+        # 新增目的批次
+        new_batch_ref = to_ref.collection("batches").document()
+        tx.set(new_batch_ref, {
+            "quantity": qty,
+            "unit": unit,
+            "status": "unused",
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "expiration_date": bd.get("expiration_date"),
+            "note": f"from {from_store}"
+        })
+
+        # 若目的沒有 active 批次 → 直接 in_use
+        if not to_data.get("current_batch_id"):
+            tx.update(new_batch_ref, {"status": "in_use"})
+            tx.update(to_ref, {
+                "current_batch_id": new_batch_ref.id,
+                "quantity": qty,
+                "status": "in_stock"
+            })
+        
+        # [FIX] 寫入交易紀錄
+        log_ref = db.collection("transaction").document()
+        tx.set(log_ref, {
+            "type": "transfer",
+            "action": "transfer",
+            "from_store": from_store,
+            "to_store": to_store,
+            "ingredient_name": ing_name,
+            "quantity": qty,
+            "unit": unit,
+            "operator": user.get("uid"),
+            "operator_name": user.get("name", "Superadmin"),
+            "created_at": firestore.SERVER_TIMESTAMP
+        })
 
     try:
-        _tx(transaction, from_ref, to_ref, qty, unit)
-    except ValueError as ve:
-        return jsonify({"ok": False, "error": str(ve)}), 400
+        _tx(transaction)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"ok": False, "error": f"交易失敗：{e}"}), 500
+        return jsonify({"error": f"transaction failed: {e}"}), 500
 
-    # --- 成功後寫入交易紀錄 ---
-    payload_str = json.dumps(data, ensure_ascii=False)
-    log = {
-        "created_at": firestore.SERVER_TIMESTAMP,
-        "created_by": user.get("uid"),
-        "from_store": from_store,
-        "to_store": to_store,
-        "from_ingredient_id": from_ing_id,
-        "to_ingredient_id": to_ing_id,
-        "ingredient_name": ing_name,
-        "quantity": qty,
-        "unit": unit,
-        "payload_str": payload_str,
-        "status": "success",
-    }
-    db.collection("transaction").add(log)
-
-    return jsonify({"ok": True, "message": "調貨成功（已原子更新兩店庫存）"}), 200
-
-# ===== 調貨紀錄：CORS 預檢 + 查詢 API =====
+    return jsonify({"ok": True}), 200
 
 @superadmin_bp.route("/superadmin/transfer_logs", methods=["OPTIONS"])
-def transfer_logs_preflight():
-    """
-    讓瀏覽器 CORS 預檢通過（與 /superadmin/transfer 的 OPTIONS 寫法一致）
-    """
+def transfer_logs_options():
     origin = request.headers.get("Origin", "*")
     resp = jsonify({})
     resp.status_code = 204
@@ -621,72 +663,87 @@ def transfer_logs_preflight():
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     resp.headers["Access-Control-Allow-Credentials"] = "true"
-    return resp  # 204 No Content
-
+    return resp
 
 @superadmin_bp.route("/superadmin/transfer_logs", methods=["GET"])
 @token_required
-def get_transfer_logs():
-    """
-    取得調貨紀錄（transaction 集合）
-    可選參數：
-      from_store, to_store, ingredient（完整比對 ingredient_name）, limit(預設100, 最多500)
-    """
+def transfer_logs():
     user = request.user or {}
+    if user.get("role") != "superadmin":
+        return jsonify({"error": "僅限企業主使用"}), 403
+
+    limit = request.args.get("limit", "100")
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 100
+
+    try:
+        docs = (
+            db.collection("transaction")
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        logs = []
+        for d in docs:
+            dd = d.to_dict() or {}
+            dd["id"] = d.id
+            logs.append(dd)
+        return jsonify({"logs": logs}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@superadmin_bp.route("/inventory_overview", methods=["GET"])
+@token_required
+def inventory_overview():
+    user = request.user
     if user.get("role") != "superadmin":
         return jsonify({"error": "你不是企業主"}), 403
 
-    from_store = request.args.get("from_store") or ""
-    to_store   = request.args.get("to_store") or ""
-    ingredient = request.args.get("ingredient") or ""
+    store_names = user.get("store_ids", [])
+    if not store_names:
+        return jsonify({"rows": []}), 200
+
+    agg = {}
     try:
-        limit = int(request.args.get("limit", 100))
-    except Exception:
-        limit = 100
-    limit = max(1, min(limit, 500))
+        for store in store_names:
+            ing_col = db.collection("stores").document(store).collection("ingredients")
+            for ing_doc in ing_col.stream():
+                ing = ing_doc.to_dict() or {}
+                name = (ing.get("name") or "").strip()
+                if not name:
+                    continue
 
-    try:
-        q = db.collection("transaction")
-        if from_store:
-            q = q.where(filter=FieldFilter("from_store", "==", from_store))
-        if to_store:
-            q = q.where(filter=FieldFilter("to_store", "==", to_store))
-        if ingredient:
-            q = q.where(filter=FieldFilter("ingredient_name", "==", ingredient))
+                unit = (ing.get("unit") or "").strip()
+                ing_ref = ing_doc.reference
 
-        # 不在 Firestore 端 order_by，避免複合索引需求/型別不一致導致 500
-        q = q.limit(limit)
+                store_total, store_earliest = _sum_available_and_earliest_exp(ing_ref, ing)
 
-        rows = []
-        for doc in q.stream():
-            d = doc.to_dict() or {}
-            ts = d.get("created_at")
-            # 安全轉 ISO（可能是 Timestamp/字串/None）
-            try:
-                created_at = ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts is not None else None)
-            except Exception:
-                created_at = str(ts) if ts is not None else None
+                if name not in agg:
+                    agg[name] = {
+                        "name": name,
+                        "unit": unit,
+                        "total_quantity": 0.0,
+                        "earliest_expiration": None,
+                        "out_of_stock_store_count": 0,
+                    }
 
-            rows.append({
-                "id": doc.id,
-                "created_at": created_at,
-                "from_store": d.get("from_store"),
-                "to_store": d.get("to_store"),
-                "ingredient_name": d.get("ingredient_name"),
-                "quantity": d.get("quantity"),
-                "unit": d.get("unit"),
-                "created_by": d.get("created_by"),
-                "status": d.get("status"),
-            })
+                if not agg[name]["unit"] and unit:
+                    agg[name]["unit"] = unit
 
-        # Python 端安全排序（None 置底）
-        rows.sort(key=lambda r: (r.get("created_at") is None, r.get("created_at")), reverse=True)
+                agg[name]["total_quantity"] += float(store_total)
 
-        resp = jsonify({"logs": rows})
-        origin = request.headers.get("Origin", "*")
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        return resp, 200
+                if store_earliest:
+                    cur = agg[name]["earliest_expiration"]
+                    if (cur is None) or (store_earliest.isoformat() < cur):
+                        agg[name]["earliest_expiration"] = store_earliest.isoformat()
 
+                if float(store_total) <= 0:
+                    agg[name]["out_of_stock_store_count"] += 1
+
+        rows = list(agg.values())
+        rows.sort(key=lambda r: r["name"])
+        return jsonify({"rows": rows}), 200
     except Exception as e:
-        return jsonify({"error": f"查詢失敗: {e}"}), 500
+        return jsonify({"error": str(e)}), 500
