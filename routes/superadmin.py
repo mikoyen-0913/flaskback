@@ -640,10 +640,9 @@ def transfer_ingredient():
             "ingredient_name": ing_name,
             "quantity": qty,
             "unit": unit,
-            "operator": user.get("uid"),
             "operator_name": user.get("name", "Superadmin"),
             "created_at": firestore.SERVER_TIMESTAMP,
-            "status": "success"
+            "status": "success"  # <--- 這裡加入了 status
         })
 
     try:
